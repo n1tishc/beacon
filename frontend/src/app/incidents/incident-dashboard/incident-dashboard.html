@@ -14,7 +14,7 @@
   <div class="alert" role="alert">{{ error }}</div>
 }
 
-<div class="layout">
+<div class="layout" [class.read-only]="!canTrigger()">
   <section class="card list-card" aria-label="Incident list">
     @if (store.incidents().length > 0) {
       <app-incident-table [incidents]="store.incidents()" />
@@ -25,7 +25,9 @@
     }
   </section>
 
-  <aside class="card">
-    <app-create-incident-form />
-  </aside>
+  @if (canTrigger()) {
+    <aside class="card">
+      <app-create-incident-form />
+    </aside>
+  }
 </div>

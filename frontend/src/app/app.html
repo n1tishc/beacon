@@ -7,9 +7,18 @@
     </svg>
     <span>Beacon</span>
   </a>
-  <nav aria-label="Main">
-    <a routerLink="/incidents" routerLinkActive="active">Incidents</a>
-  </nav>
+
+  @if (auth.user(); as user) {
+    <nav aria-label="Main">
+      <a routerLink="/incidents" routerLinkActive="active">Incidents</a>
+    </nav>
+
+    <div class="account">
+      <span class="account-name" data-testid="current-user">{{ user.displayName }}</span>
+      <span class="account-role">{{ user.role | titlecase }}</span>
+      <button type="button" class="sign-out" (click)="auth.logout()">Sign out</button>
+    </div>
+  }
 </header>
 
 <main>

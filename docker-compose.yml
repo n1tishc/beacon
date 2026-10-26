@@ -1,6 +1,14 @@
 # Whole stack, one command:  docker compose up --build
 # Every value has a working local default; copy .env.example to .env to override.
+#
+# Only `web` (the UI) and `gateway` (the API) are published to the host. The services behind
+# the gateway are reachable only on the compose network, as they would be in production.
 name: beacon
+
+x-database-env: &database-env
+  DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-beacon}
+  DB_USERNAME: ${POSTGRES_USER:-beacon}
+  DB_PASSWORD: ${POSTGRES_PASSWORD:-beacon}
 
 services:
   postgres:
@@ -20,17 +28,38 @@ services:
       timeout: 3s
       retries: 10
 
+  auth-service:
+    build:
+      context: ./backend
+      args:
+        SERVICE: auth-service
+    environment:
+      <<: *database-env
+      # Optional PKCS#8 PEM. Without it auth-service generates a key at startup (fine locally).
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-}
+      DEMO_USERS_ENABLED: "true"
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:-beacon-demo}
+      # Local stack is plain http; Safari drops Secure cookies on http://localhost. Always true in AWS.
+      AUTH_SECURE_COOKIE: ${AUTH_SECURE_COOKIE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 512m
+
   incident-service:
     build:
       context: ./backend
       args:
         SERVICE: incident-service
     environment:
-      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-beacon}
-      DB_USERNAME: ${POSTGRES_USER:-beacon}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-beacon}
-    ports:
-      - "8081:8081"
+      <<: *database-env
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,12 +71,42 @@ services:
       start_period: 10s
     mem_limit: 512m
 
+  gateway:
+    build:
+      context: ./backend
+      args:
+        SERVICE: gateway
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:8082
+      INCIDENT_SERVICE_URL: http://incident-service:8081
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      # nginx (web) is the one proxy in front of the gateway.
+      TRUSTED_PROXY_HOPS: "1"
+      RATE_LIMIT_LOGIN_CAPACITY: ${RATE_LIMIT_LOGIN_CAPACITY:-10}
+      RATE_LIMIT_API_CAPACITY: ${RATE_LIMIT_API_CAPACITY:-100}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      incident-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 512m
+
   web:
     build: ./frontend
+    environment:
+      API_UPSTREAM: http://gateway:8080
     ports:
       - "${WEB_PORT:-4200}:80"
     depends_on:
-      incident-service:
+      gateway:
         condition: service_healthy
 
 volumes:
