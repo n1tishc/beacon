@@ -12,6 +12,8 @@
     />
     @if (form.controls.title.touched && form.controls.title.invalid) {
       <p class="field-error">Give the incident a title (up to 200 characters).</p>
+    } @else if (store.fieldErrors()['title']; as message) {
+      <p class="field-error" data-testid="server-error">Title {{ message }}.</p>
     }
   </div>
 
@@ -22,6 +24,9 @@
         <option [value]="severity">{{ severity | titlecase }}</option>
       }
     </select>
+    @if (store.fieldErrors()['severity']; as message) {
+      <p class="field-error" data-testid="server-error">Severity {{ message }}.</p>
+    }
   </div>
 
   <div class="field">
@@ -34,6 +39,8 @@
     ></textarea>
     @if (form.controls.description.invalid) {
       <p class="field-error">Keep the description under 4000 characters.</p>
+    } @else if (store.fieldErrors()['description']; as message) {
+      <p class="field-error" data-testid="server-error">Description {{ message }}.</p>
     }
   </div>
 

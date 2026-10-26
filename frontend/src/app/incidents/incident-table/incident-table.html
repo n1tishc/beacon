@@ -16,7 +16,7 @@
           }}</span>
         </td>
         <td>
-          <div class="title">{{ incident.title }}</div>
+          <a class="title" [routerLink]="[incident.id]">{{ incident.title }}</a>
           @if (incident.description) {
             <div class="description">{{ incident.description }}</div>
           }

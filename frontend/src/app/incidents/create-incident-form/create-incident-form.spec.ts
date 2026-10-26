@@ -1,3 +1,4 @@
+import { WritableSignal, signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 
@@ -6,10 +7,14 @@ import { anIncident } from '../testing/incident-fixtures';
 import { CreateIncidentForm } from './create-incident-form';
 
 describe('CreateIncidentForm', () => {
-  let store: { create: ReturnType<typeof vi.fn>; saving: () => boolean };
+  let store: {
+    create: ReturnType<typeof vi.fn>;
+    saving: () => boolean;
+    fieldErrors: WritableSignal<Record<string, string>>;
+  };
 
   beforeEach(async () => {
-    store = { create: vi.fn(() => of(anIncident())), saving: () => false };
+    store = { create: vi.fn(() => of(anIncident())), saving: () => false, fieldErrors: signal({}) };
     await TestBed.configureTestingModule({
       imports: [CreateIncidentForm],
       providers: [{ provide: IncidentStore, useValue: store }],
@@ -58,5 +63,17 @@ describe('CreateIncidentForm', () => {
       severity: 'CRITICAL',
     });
     expect(element.querySelector<HTMLInputElement>('#incident-title')!.value).toBe('');
+  });
+
+  it('shows validation errors the server sent next to their fields', async () => {
+    const { fixture, element } = await render();
+
+    store.fieldErrors.set({ title: 'must not be blank', severity: 'must not be null' });
+    await fixture.whenStable();
+
+    const messages = [...element.querySelectorAll('[data-testid="server-error"]')].map((e) =>
+      e.textContent?.trim(),
+    );
+    expect(messages).toEqual(['Title must not be blank.', 'Severity must not be null.']);
   });
 });

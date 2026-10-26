@@ -35,7 +35,16 @@ tbody tr:hover {
 }
 
 .title {
+  display: block;
+  color: inherit;
   font-weight: 500;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.title:hover {
+  color: var(--primary);
+  text-decoration: underline;
 }
 
 .description {
@@ -64,46 +73,4 @@ tbody tr:hover {
   white-space: nowrap;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
-}
-
-.severity,
-.status {
-  display: inline-block;
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-}
-
-.severity-critical {
-  background: var(--sev-critical-bg);
-  color: var(--sev-critical);
-}
-.severity-high {
-  background: var(--sev-high-bg);
-  color: var(--sev-high);
-}
-.severity-medium {
-  background: var(--sev-medium-bg);
-  color: var(--sev-medium);
-}
-.severity-low {
-  background: var(--sev-low-bg);
-  color: var(--sev-low);
-}
-
-.status {
-  border: 1px solid currentColor;
-  background: transparent;
-}
-
-.status-triggered {
-  color: var(--status-triggered);
-}
-.status-acknowledged {
-  color: var(--status-acknowledged);
-}
-.status-resolved {
-  color: var(--status-resolved);
 }

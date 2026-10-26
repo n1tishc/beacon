@@ -3,8 +3,11 @@ package dev.beacon.incident.api;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+import static dev.beacon.incident.TestIncidents.persisted;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -26,7 +29,6 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.RequestBuilder;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
@@ -71,11 +73,8 @@ class IncidentSecurityTest {
     void setUp() {
         authService.stubFor(get("/.well-known/jwks.json").willReturn(okJson(tokens.jwksJson())));
         when(incidentService.list(anyInt(), anyInt())).thenReturn(Page.empty());
-        when(incidentService.create(any(), any(), any())).thenAnswer(invocation -> {
-            Incident incident = Incident.trigger(invocation.getArgument(0), null, invocation.getArgument(2), Instant.now());
-            ReflectionTestUtils.setField(incident, "id", UUID.randomUUID());
-            return incident;
-        });
+        when(incidentService.create(any(), any(), any(), any())).thenAnswer(invocation ->
+                persisted(invocation.getArgument(0), invocation.getArgument(2), Instant.now()));
     }
 
     @Test
@@ -99,10 +98,50 @@ class IncidentSecurityTest {
         verifyNoInteractions(incidentService);
     }
 
+    /** Real tokens go through security-common's converter, which names the caller by preferred_username. */
     @Test
-    void respondersCanTriggerIncidents() throws Exception {
+    void respondersCanTriggerIncidentsAndAreRecordedByUsername() throws Exception {
         mvc.perform(create(tokens.forRole(Role.RESPONDER)))
                 .andExpect(status().isCreated());
+
+        verify(incidentService).create("Search latency above SLO", null, Severity.MEDIUM, "responder");
+    }
+
+    @Test
+    void viewersCannotChangeAnIncident() throws Exception {
+        String viewer = tokens.forRole(Role.VIEWER);
+        UUID id = UUID.randomUUID();
+
+        mvc.perform(command(viewer, "/api/incidents/" + id + "/acknowledge", "{\"version\": 0}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(command(viewer, "/api/incidents/" + id + "/resolve", "{\"version\": 0}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(command(viewer, "/api/incidents/" + id + "/notes", "{\"text\": \"hello\"}"))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(incidentService);
+    }
+
+    @Test
+    void viewersCanReadTheTimeline() throws Exception {
+        UUID id = UUID.randomUUID();
+        when(incidentService.timeline(id)).thenReturn(List.of());
+
+        mvc.perform(MockMvcRequestBuilders.get("/api/incidents/{id}/timeline", id)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + tokens.forRole(Role.VIEWER)))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void respondersCanAcknowledgeAndAreRecordedByUsername() throws Exception {
+        Incident incident = persisted("Search latency above SLO", Severity.MEDIUM, Instant.now());
+        when(incidentService.acknowledge(eq(incident.getId()), eq(0L), any())).thenReturn(incident);
+
+        mvc.perform(command(tokens.forRole(Role.RESPONDER), "/api/incidents/" + incident.getId() + "/acknowledge",
+                        "{\"version\": 0}"))
+                .andExpect(status().isOk());
+
+        verify(incidentService).acknowledge(incident.getId(), 0L, "responder");
     }
 
     /** ADMIN is never named on the endpoint; it gets in only through the role hierarchy. */
@@ -142,6 +181,13 @@ class IncidentSecurityTest {
 
     private static RequestBuilder list(String token) {
         return MockMvcRequestBuilders.get("/api/incidents").header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+    }
+
+    private static RequestBuilder command(String token, String path, String body) {
+        return post(path)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body);
     }
 
     private static RequestBuilder create(String token) {

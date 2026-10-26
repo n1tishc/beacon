@@ -3,6 +3,7 @@ import { HttpTestingController, provideHttpClientTesting } from '@angular/common
 import { TestBed } from '@angular/core/testing';
 
 import { IncidentApi } from './incident-api';
+import { anIncident } from './testing/incident-fixtures';
 
 describe('IncidentApi', () => {
   let api: IncidentApi;
@@ -35,5 +36,29 @@ describe('IncidentApi', () => {
     expect(request.request.method).toBe('POST');
     expect(request.request.body).toEqual(body);
     request.flush({});
+  });
+
+  it('sends the version it last saw with acknowledge and resolve', () => {
+    const incident = anIncident({ id: 'abc', version: 3 });
+
+    api.acknowledge(incident).subscribe();
+    api.resolve(incident, 'Rolled back').subscribe();
+
+    const acknowledge = http.expectOne('/api/incidents/abc/acknowledge');
+    expect(acknowledge.request.body).toEqual({ version: 3 });
+    acknowledge.flush({});
+    const resolve = http.expectOne('/api/incidents/abc/resolve');
+    expect(resolve.request.body).toEqual({ version: 3, note: 'Rolled back' });
+    resolve.flush({});
+  });
+
+  it('reads the timeline and posts notes', () => {
+    api.timeline('abc').subscribe();
+    api.addNote('abc', 'Paged the DB team').subscribe();
+
+    http.expectOne({ method: 'GET', url: '/api/incidents/abc/timeline' }).flush([]);
+    const note = http.expectOne({ method: 'POST', url: '/api/incidents/abc/notes' });
+    expect(note.request.body).toEqual({ text: 'Paged the DB team' });
+    note.flush({});
   });
 });

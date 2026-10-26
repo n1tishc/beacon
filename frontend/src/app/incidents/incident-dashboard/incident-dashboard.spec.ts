@@ -2,6 +2,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 
 import { AuthStore } from '../../core/auth/auth-store';
 import { Role } from '../../core/auth/auth.model';
@@ -19,6 +20,7 @@ describe('IncidentDashboard', () => {
     await TestBed.configureTestingModule({
       imports: [IncidentDashboard],
       providers: [
+        provideRouter([]),
         provideHttpClient(),
         provideHttpClientTesting(),
         {
@@ -54,6 +56,7 @@ describe('IncidentDashboard', () => {
     const rows = element.querySelectorAll('[data-testid="incident-row"]');
     expect(rows.length).toBe(2);
     expect(rows[0].textContent).toContain('Payments down');
+    expect(rows[0].querySelector('a.title')?.getAttribute('href')).toMatch(/^\/[0-9a-f-]{36}$/);
     expect(rows[0].querySelector('.severity')?.classList).toContain('severity-critical');
     expect(rows[0].querySelector('.status')?.textContent).toContain('TRIGGERED');
     expect(element.querySelector('.subtitle')?.textContent).toContain('2 incidents');
