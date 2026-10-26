@@ -1,0 +1,114 @@
+# The AWS deployment: the four Spring services on one EC2 instance. Not for local use; the root
+# docker-compose.yml is the local stack.
+#
+# In AWS, Postgres is RDS, the alert queue is SQS and attachments are in S3, so there is no Postgres,
+# LocalStack or fake Slack here. The Angular app is served by S3 + CloudFront, which also sends
+# /api/* to the gateway, so the gateway is the only published port. The instance's security group
+# admits CloudFront alone.
+#
+# start.sh writes .env from SSM Parameter Store and runs this file; every ${VAR:?} below comes from there.
+# No AWS credentials or endpoints are set: the SDK uses the EC2 instance role.
+name: beacon
+
+x-service: &service
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+# Four JVMs share a 1 GiB t3.micro. Measured locally with these flags, each one settles at roughly
+# 250-300 MB resident; the instance's swapfile holds the pages they rarely touch.
+# TieredStopAtLevel=1 trades peak throughput for a smaller code cache and a faster start.
+x-jvm: &jvm "-XX:+UseSerialGC -Xmx128m -Xss256k -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=32m -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError"
+
+x-database-env: &database-env
+  DB_URL: ${DB_URL:?}
+  DB_USERNAME: ${DB_USERNAME:?}
+  DB_PASSWORD: ${DB_PASSWORD:?}
+  # Three services share one db.t4g.micro; a small pool each is plenty.
+  SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"
+
+x-healthcheck: &healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 30
+  start_period: 120s
+
+services:
+  auth-service:
+    <<: *service
+    image: ${REGISTRY:?}/beacon/auth-service:${IMAGE_TAG:?}
+    environment:
+      <<: *database-env
+      JAVA_OPTS: *jvm
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?}
+      DEMO_USERS_ENABLED: "true"
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?}
+      AUTH_SECURE_COOKIE: "true"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health/readiness"]
+
+  # The depends_on chain below is a boot order, not a runtime dependency: starting four JVMs at once
+  # on a burstable instance with 1 GiB is slower than starting them one after another.
+  incident-service:
+    <<: *service
+    image: ${REGISTRY:?}/beacon/incident-service:${IMAGE_TAG:?}
+    environment:
+      <<: *database-env
+      JAVA_OPTS: *jvm
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      AWS_REGION: ${AWS_REGION:?}
+      ALERT_QUEUE: ${ALERT_QUEUE:?}
+      ATTACHMENTS_BUCKET: ${ATTACHMENTS_BUCKET:?}
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+      NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:?}
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health/readiness"]
+
+  notification-service:
+    <<: *service
+    image: ${REGISTRY:?}/beacon/notification-service:${IMAGE_TAG:?}
+    environment:
+      <<: *database-env
+      JAVA_OPTS: *jvm
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:?}
+      # Empty: Slack is off and only the mock sink is notified.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      BEACON_PUBLIC_URL: ${BEACON_PUBLIC_URL:?}
+    depends_on:
+      incident-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health/readiness"]
+
+  gateway:
+    <<: *service
+    image: ${REGISTRY:?}/beacon/gateway:${IMAGE_TAG:?}
+    environment:
+      JAVA_OPTS: *jvm
+      AUTH_SERVICE_URL: http://auth-service:8082
+      INCIDENT_SERVICE_URL: http://incident-service:8081
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      # CloudFront is the one proxy in front of the gateway: it appends the viewer's address to
+      # X-Forwarded-For, and the security group lets nothing else reach this port.
+      TRUSTED_PROXY_HOPS: "1"
+      RATE_LIMIT_LOGIN_CAPACITY: ${RATE_LIMIT_LOGIN_CAPACITY:-10}
+      RATE_LIMIT_API_CAPACITY: ${RATE_LIMIT_API_CAPACITY:-100}
+    ports:
+      - "8080:8080"
+    depends_on:
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]

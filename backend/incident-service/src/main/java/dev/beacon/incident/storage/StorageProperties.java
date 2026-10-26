@@ -18,6 +18,9 @@ import org.springframework.validation.annotation.Validated;
  *                       so the URL has to be signed for the browser's host from the start.
  * @param pathStyleAccess {@code http://host/bucket/key} instead of {@code http://bucket.host/key};
  *                        LocalStack needs it, AWS does not.
+ * @param abandonedUploadAfter how long an announced upload may stay unfinished before it is
+ *                             discarded. Much longer than {@code uploadUrlTtl}, so no upload that
+ *                             could still succeed is thrown away.
  */
 @Validated
 @ConfigurationProperties("beacon.attachments")
@@ -26,5 +29,6 @@ public record StorageProperties(
         URI publicEndpoint,
         boolean pathStyleAccess,
         @NotNull Duration uploadUrlTtl,
-        @NotNull Duration downloadUrlTtl) {
+        @NotNull Duration downloadUrlTtl,
+        @NotNull Duration abandonedUploadAfter) {
 }

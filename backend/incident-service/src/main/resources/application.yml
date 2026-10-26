@@ -54,6 +54,9 @@ beacon:
     path-style-access: ${S3_PATH_STYLE_ACCESS:false}
     upload-url-ttl: 5m
     download-url-ttl: 1m
+    # Unfinished uploads older than this are discarded, checked every cleanup-interval.
+    abandoned-upload-after: 1h
+    cleanup-interval: 15m
 
 # notification-service takes up to 7.5 s when Slack is failing (its own retries; see its
 # application.yml), so one attempt here may take 10 s. All of it runs after the incident is saved,

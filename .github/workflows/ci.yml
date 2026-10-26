@@ -4,10 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Runs everything, and deploys when run on main: how the first release goes out after scripts/aws-up.sh.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push supersedes a PR's run, but a deploy on main is never cut off halfway.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -35,6 +38,14 @@ jobs:
           name: jacoco-report
           path: backend/*/target/site/jacoco/
           if-no-files-found: ignore
+      # The deploy job ships this exact, tested jar to Lambda.
+      - name: Keep the alert Lambda for the deploy job
+        uses: actions/upload-artifact@v7
+        with:
+          name: alert-ingest-lambda
+          path: backend/alert-ingest-lambda/target/alert-ingest-lambda.jar
+          if-no-files-found: error
+          retention-days: 7
 
   frontend:
     name: Frontend · build & test
@@ -56,6 +67,33 @@ jobs:
         run: npm run test:ci
       - name: Production build
         run: npm run build
+      - name: Keep the build for the deploy job
+        uses: actions/upload-artifact@v7
+        with:
+          name: web
+          path: frontend/dist/beacon-web/browser/
+          if-no-files-found: error
+          retention-days: 7
+
+  terraform:
+    name: Terraform · validate & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '~1.15.0'
+      - run: terraform fmt -check -recursive
+      - name: Validate the bootstrap configuration
+        working-directory: infra/terraform/bootstrap
+        run: terraform init -backend=false -input=false && terraform validate
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+      # Guardrails against a mocked AWS provider: no account or credentials involved.
+      - run: terraform test
 
   stack:
     name: Docker Compose · build & smoke test
@@ -85,3 +123,87 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down --volumes
+
+  # Ships main to AWS, then runs the same smoke test against the live URL. Skipped until
+  # scripts/aws-up.sh has created the infrastructure and set the repository variables used here.
+  deploy:
+    name: Deploy to AWS · smoke test
+    needs: [backend, frontend, stack, terraform]
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC: the job assumes the deploy role, no AWS keys stored in GitHub
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v4
+
+      # Tagged with the commit SHA. ECR tags are immutable, so re-running a deploy reuses the images.
+      - name: Build and push images
+        run: |
+          for service in auth-service incident-service notification-service gateway; do
+            image="${{ vars.ECR_REGISTRY }}/beacon/$service:$IMAGE_TAG"
+            if aws ecr describe-images --repository-name "beacon/$service" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "$image already pushed"
+              continue
+            fi
+            docker buildx build --load --build-arg SERVICE="$service" -t "$image" backend
+            docker push "$image"
+          done
+
+      # Flyway migrates on startup, so the backend goes first and the UI that may depend on it after.
+      - name: Deploy the services to EC2 (SSM Run Command)
+        run: scripts/deploy-to-instance.sh "${{ vars.INSTANCE_ID }}" "$IMAGE_TAG"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: alert-ingest-lambda
+          path: lambda
+      - name: Deploy the alert Lambda
+        run: |
+          aws lambda update-function-code --function-name "${{ vars.ALERT_LAMBDA }}" \
+            --zip-file fileb://lambda/alert-ingest-lambda.jar --query LastUpdateStatus --output text
+          aws lambda wait function-updated-v2 --function-name "${{ vars.ALERT_LAMBDA }}"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: web
+          path: web
+      # Hashed bundles first, cached for good; index.html last and never cached, so a browser never
+      # gets an index.html whose bundles are not there yet. Old bundles stay for tabs still open.
+      - name: Publish the Angular app to S3 and CloudFront
+        run: |
+          aws s3 sync web "s3://${{ vars.WEB_BUCKET }}" --exclude index.html \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp web/index.html "s3://${{ vars.WEB_BUCKET }}/index.html" --cache-control "no-cache"
+          aws cloudfront create-invalidation --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths /index.html --query Invalidation.Id --output text
+
+      - name: Smoke test the live deployment
+        run: |
+          DEMO_USER_PASSWORD="$(aws ssm get-parameter --with-decryption --name "${{ vars.DEMO_PASSWORD_PARAMETER }}" \
+            --query Parameter.Value --output text)"
+          INGEST_API_KEY="$(aws ssm get-parameter --with-decryption --name "${{ vars.INGEST_KEY_PARAMETER }}" \
+            --query Parameter.Value --output text)"
+          echo "::add-mask::$DEMO_USER_PASSWORD"
+          echo "::add-mask::$INGEST_API_KEY"
+          export DEMO_USER_PASSWORD INGEST_API_KEY
+          INGEST_URL="${{ vars.INGEST_URL }}" EXPECT_SLACK="${{ vars.EXPECT_SLACK }}" \
+            scripts/smoke-test.sh "${{ vars.APP_URL }}"
