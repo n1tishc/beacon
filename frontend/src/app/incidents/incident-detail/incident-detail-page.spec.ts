@@ -129,4 +129,19 @@ describe('IncidentDetailPage', () => {
     expect(testId(element, 'notice')?.textContent).toContain('Someone else updated this incident');
     expect(testId(element, 'status')?.textContent).toContain('ACKNOWLEDGED');
   });
+
+  it('shows the alert source, count and fingerprint for alert-opened incidents', async () => {
+    const { element } = await render(
+      anIncident({
+        source: 'grafana',
+        alertCount: 4,
+        fingerprint: 'abc123',
+        lastAlertAt: '2026-01-15T10:05:00Z',
+      }),
+    );
+
+    expect(testId(element, 'source')?.textContent).toContain('grafana');
+    expect(testId(element, 'alert-count')?.textContent).toContain('4');
+    expect(element.querySelector('.fingerprint')?.textContent).toContain('abc123');
+  });
 });

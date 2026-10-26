@@ -80,4 +80,20 @@ describe('IncidentDashboard', () => {
 
     expect(element.querySelector('app-create-incident-form')).toBeNull();
   });
+
+  it('says the list is live once loaded, and shows where alert-opened incidents came from', async () => {
+    const element = await renderWith(
+      aPageOf([
+        anIncident({ title: 'Payments down', source: 'grafana', alertCount: 3 }),
+        anIncident({ title: 'Opened by hand' }),
+      ]),
+    );
+
+    expect(element.querySelector('[data-testid="live-status"]')?.textContent).toContain('Live');
+    const rows = element.querySelectorAll('[data-testid="incident-row"]');
+    expect(rows[0].querySelector('[data-testid="origin"]')?.textContent).toContain(
+      'grafana · 3 alerts',
+    );
+    expect(rows[1].querySelector('[data-testid="origin"]')).toBeNull();
+  });
 });

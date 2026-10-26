@@ -5,3 +5,11 @@ spring:
     url: jdbc:postgresql://localhost:5433/beacon
     username: beacon
     password: beacon
+  # LocalStack from docker-compose.yml (`docker compose up -d localstack`).
+  cloud:
+    aws:
+      credentials:
+        access-key: test
+        secret-key: test
+      sqs:
+        endpoint: http://localhost:4566

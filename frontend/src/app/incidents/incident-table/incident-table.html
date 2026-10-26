@@ -17,6 +17,12 @@
         </td>
         <td>
           <a class="title" [routerLink]="[incident.id]">{{ incident.title }}</a>
+          @if (incident.source) {
+            <div class="origin" data-testid="origin">
+              {{ incident.source }} · {{ incident.alertCount }}
+              {{ incident.alertCount === 1 ? 'alert' : 'alerts' }}
+            </div>
+          }
           @if (incident.description) {
             <div class="description">{{ incident.description }}</div>
           }

@@ -1,10 +1,27 @@
+import { DOCUMENT } from '@angular/common';
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
-import { EMPTY, Observable, catchError, finalize, tap } from 'rxjs';
+import {
+  EMPTY,
+  Observable,
+  catchError,
+  distinctUntilChanged,
+  exhaustMap,
+  finalize,
+  fromEvent,
+  map,
+  startWith,
+  switchMap,
+  tap,
+  timer,
+} from 'rxjs';
 
 import { AuthStore } from '../core/auth/auth-store';
 import { fieldErrors, problemMessage } from '../core/problem-message';
 import { IncidentApi } from './incident-api';
-import { CreateIncidentRequest, Incident } from './incident.model';
+import { CreateIncidentRequest, Incident, Page } from './incident.model';
+
+/** How often the dashboard polls while it is visible. */
+export const LIVE_REFRESH_MS = 5000;
 
 interface IncidentState {
   incidents: Incident[];
@@ -14,6 +31,10 @@ interface IncidentState {
   error: string | null;
   /** Server-side validation messages for the create form, keyed by field. */
   fieldErrors: Record<string, string>;
+  /** When the list last came back from the server. */
+  updatedAt: Date | null;
+  /** The last background refresh failed; the list shown may be out of date. */
+  liveFailing: boolean;
 }
 
 const initialState: IncidentState = {
@@ -23,6 +44,8 @@ const initialState: IncidentState = {
   saving: false,
   error: null,
   fieldErrors: {},
+  updatedAt: null,
+  liveFailing: false,
 };
 
 /**
@@ -33,7 +56,14 @@ const initialState: IncidentState = {
 export class IncidentStore {
   private readonly api = inject(IncidentApi);
   private readonly auth = inject(AuthStore);
+  private readonly document = inject(DOCUMENT);
   private readonly state = signal<IncidentState>(initialState);
+
+  /**
+   * Bumped on every local change to the list. A poll that started before the change may return a
+   * list without it; such a response is dropped instead of briefly un-doing what the user just did.
+   */
+  private localChanges = 0;
 
   constructor() {
     // Never show one user's data to the next person who signs in on this tab.
@@ -50,33 +80,81 @@ export class IncidentStore {
   readonly saving = computed(() => this.state().saving);
   readonly error = computed(() => this.state().error);
   readonly fieldErrors = computed(() => this.state().fieldErrors);
+  readonly updatedAt = computed(() => this.state().updatedAt);
+  readonly liveFailing = computed(() => this.state().liveFailing);
 
   load(): void {
     this.patch({ loading: true, error: null });
     this.api.list().subscribe({
-      next: (page) =>
-        this.patch({ incidents: page.content, total: page.totalElements, loading: false }),
+      next: (page) => this.applyPage(page),
       error: (error) => this.patch({ loading: false, error: problemMessage(error) }),
     });
+  }
+
+  /**
+   * Keeps the list fresh while subscribed: polls every `periodMs`, but only while the browser tab is
+   * visible, and refreshes straight away when the user comes back to it. Background refreshes never
+   * show the loading state. A slow response is never stacked on or cancelled: `exhaustMap` skips
+   * ticks while a request is still in flight. The caller owns the subscription (the dashboard ends it
+   * when it is destroyed).
+   */
+  live(periodMs = LIVE_REFRESH_MS): Observable<void> {
+    const visible$ = fromEvent(this.document, 'visibilitychange').pipe(
+      map(() => !this.document.hidden),
+      startWith(!this.document.hidden),
+      distinctUntilChanged(),
+    );
+    return visible$.pipe(
+      // On first subscription the caller has just loaded, so wait a period; on return to the tab, refresh now.
+      switchMap((visible, index) =>
+        visible ? timer(index === 0 ? periodMs : 0, periodMs) : EMPTY,
+      ),
+      exhaustMap(() => {
+        const changesBefore = this.localChanges;
+        return this.api.list().pipe(
+          tap((page) => {
+            if (this.localChanges === changesBefore) {
+              this.applyPage(page);
+            }
+          }),
+          catchError(() => {
+            this.patch({ liveFailing: true });
+            return EMPTY;
+          }),
+        );
+      }),
+      map(() => undefined),
+    );
   }
 
   /** Emits the created incident on success; on failure the error lands in `error()` and nothing is emitted. */
   create(request: CreateIncidentRequest): Observable<Incident> {
     this.patch({ saving: true, error: null, fieldErrors: {} });
     return this.api.create(request).pipe(
-      tap((incident) =>
+      tap((incident) => {
+        this.localChanges++;
         this.state.update((state) => ({
           ...state,
           incidents: [incident, ...state.incidents],
           total: state.total + 1,
-        })),
-      ),
+        }));
+      }),
       catchError((error) => {
         this.patch({ error: problemMessage(error), fieldErrors: fieldErrors(error) });
         return EMPTY;
       }),
       finalize(() => this.patch({ saving: false })),
     );
+  }
+
+  private applyPage(page: Page<Incident>): void {
+    this.patch({
+      incidents: page.content,
+      total: page.totalElements,
+      loading: false,
+      updatedAt: new Date(),
+      liveFailing: false,
+    });
   }
 
   private patch(partial: Partial<IncidentState>): void {

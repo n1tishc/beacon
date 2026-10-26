@@ -12,6 +12,10 @@ export function anIncident(overrides: Partial<Incident> = {}): Incident {
     updatedAt: '2026-01-15T10:00:00Z',
     acknowledgedAt: null,
     resolvedAt: null,
+    source: null,
+    fingerprint: null,
+    alertCount: 0,
+    lastAlertAt: null,
     ...overrides,
   };
 }

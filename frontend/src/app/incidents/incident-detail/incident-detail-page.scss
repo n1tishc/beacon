@@ -69,7 +69,16 @@ dt {
 
 dd {
   margin: 0;
+  min-width: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.fingerprint {
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .actions,

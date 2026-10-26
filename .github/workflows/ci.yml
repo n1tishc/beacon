@@ -65,9 +65,11 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       # Proves `docker compose up --build` works on a machine with nothing but Docker installed,
       # and that the entities match the Flyway schema (ddl-auto=validate fails startup otherwise).
+      # The wait covers LocalStack's init script, which deploys the alert Lambda and its API.
       - name: Build images and start the stack
-        run: docker compose up --build --detach --wait --wait-timeout 180
-      # Logs in as each demo role through nginx -> gateway -> services and checks 401/403/201.
+        run: docker compose up --build --detach --wait --wait-timeout 360
+      # Logs in as each demo role through nginx -> gateway -> services, walks an incident through its
+      # lifecycle, and sends alerts through API Gateway -> Lambda -> SQS (LocalStack) -> incident-service.
       - name: Smoke test through the web proxy
         run: scripts/smoke-test.sh http://localhost:4200
       - name: Service logs

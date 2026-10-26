@@ -57,6 +57,24 @@ public class Incident {
     @Column(name = "resolved_at")
     private Instant resolvedAt;
 
+    /** The monitoring system that opened this incident; null when a person triggered it. */
+    @Column(length = 48)
+    private String source;
+
+    /** Alerts with this fingerprint fold into this incident while it is open. */
+    @Column(length = 128)
+    private String fingerprint;
+
+    /**
+     * Changed only by {@link IncidentRepository#recordRepeatAlert}, a bulk update that does not bump
+     * {@link #version}: a noisy alert must not make every responder's acknowledge stale.
+     */
+    @Column(name = "alert_count", nullable = false)
+    private int alertCount;
+
+    @Column(name = "last_alert_at")
+    private Instant lastAlertAt;
+
     protected Incident() {
         // required by JPA
     }
@@ -74,6 +92,17 @@ public class Incident {
     /** Every incident starts life in {@link IncidentStatus#TRIGGERED}. */
     public static Incident trigger(String title, String description, Severity severity, Instant now) {
         return new Incident(title, description, severity, now);
+    }
+
+    /** An incident opened by the first alert with a given fingerprint. */
+    public static Incident triggerFromAlert(String title, String description, Severity severity,
+                                           String source, String fingerprint, Instant alertReceivedAt, Instant now) {
+        Incident incident = new Incident(title, description, severity, now);
+        incident.source = source;
+        incident.fingerprint = fingerprint;
+        incident.alertCount = 1;
+        incident.lastAlertAt = alertReceivedAt;
+        return incident;
     }
 
     public IncidentEvent.Triggered triggeredBy(String actor) {
@@ -149,5 +178,21 @@ public class Incident {
 
     public Instant getResolvedAt() {
         return resolvedAt;
+    }
+
+    public String getSource() {
+        return source;
+    }
+
+    public String getFingerprint() {
+        return fingerprint;
+    }
+
+    public int getAlertCount() {
+        return alertCount;
+    }
+
+    public Instant getLastAlertAt() {
+        return lastAlertAt;
     }
 }

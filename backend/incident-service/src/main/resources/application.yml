@@ -21,6 +21,14 @@ spring:
   flyway:
     schemas: incident
     default-schema: incident
+  cloud:
+    aws:
+      # Credentials come from the default AWS chain: the EC2 instance role in AWS, env vars locally.
+      region:
+        static: ${AWS_REGION:us-east-1}
+      sqs:
+        # A missing queue is a deployment error. Never let the app create one without its dead-letter queue.
+        queue-not-found-strategy: fail
   security:
     oauth2:
       resourceserver:
@@ -28,6 +36,10 @@ spring:
           # Public keys come from auth-service; tokens must also carry this issuer.
           jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8082/.well-known/jwks.json}
           issuer-uri: ${JWT_ISSUER:beacon-auth}
+
+beacon:
+  alerts:
+    queue: ${ALERT_QUEUE:beacon-alerts}
 
 server:
   port: ${PORT:8081}

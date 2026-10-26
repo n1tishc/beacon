@@ -3,6 +3,13 @@
     <h1>Incidents</h1>
     <p class="subtitle">
       {{ store.total() }} {{ store.total() === 1 ? 'incident' : 'incidents' }}, newest first
+      @if (store.updatedAt(); as updatedAt) {
+        <span class="live" [class.failing]="store.liveFailing()" data-testid="live-status">
+          <span class="live-dot" aria-hidden="true"></span>
+          {{ store.liveFailing() ? 'Live updates failing' : 'Live' }} · updated
+          <time [attr.datetime]="updatedAt.toISOString()">{{ updatedAt | date: 'HH:mm:ss' }}</time>
+        </span>
+      }
     </p>
   </div>
   <button type="button" (click)="store.load()" [disabled]="store.loading()">

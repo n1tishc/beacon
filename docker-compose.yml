@@ -1,8 +1,9 @@
 # Whole stack, one command:  docker compose up --build
 # Every value has a working local default; copy .env.example to .env to override.
 #
-# Only `web` (the UI) and `gateway` (the API) are published to the host. The services behind
-# the gateway are reachable only on the compose network, as they would be in production.
+# Only `web` (the UI) and `gateway` (the API) are published to the host, plus LocalStack (the
+# alert endpoint, on 127.0.0.1 only). The services behind the gateway are reachable only on the
+# compose network, as they would be in production.
 name: beacon
 
 x-database-env: &database-env
@@ -52,6 +53,32 @@ services:
       start_period: 10s
     mem_limit: 512m
 
+  # AWS emulator for the alert pipeline: API Gateway -> Lambda -> SQS (+ DLQ). See infra/localstack.
+  # Lambda functions run in sibling containers, so LocalStack needs the Docker socket. That is a
+  # local-development convenience only; in AWS these are managed services (slice 7).
+  localstack:
+    build:
+      context: ./infra/localstack
+      additional_contexts:
+        backend: ./backend
+    environment:
+      INGEST_API_KEY: ${INGEST_API_KEY:-local-ingest-key}
+      AWS_DEFAULT_REGION: us-east-1
+      # Lambda containers join the compose network so they can reach LocalStack's SQS.
+      LAMBDA_DOCKER_NETWORK: beacon_default
+    ports:
+      # Bound to localhost only: this container can start other containers through the socket.
+      - "127.0.0.1:${LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      # Healthy once the init script has created the queue, the Lambda and the API.
+      test: ["CMD", "test", "-f", "/tmp/beacon-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
   incident-service:
     build:
       context: ./backend
@@ -60,8 +87,16 @@ services:
     environment:
       <<: *database-env
       AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      # The alert queue lives in LocalStack. LocalStack accepts any credentials; in AWS the
+      # EC2 instance role provides real ones and no endpoint override is set.
+      SPRING_CLOUD_AWS_SQS_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
     depends_on:
       postgres:
+        condition: service_healthy
+      localstack:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health/readiness"]

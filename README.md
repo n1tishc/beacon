@@ -4,7 +4,7 @@
 
 Beacon is a small incident management platform in the spirit of PagerDuty. Alerts come in, become incidents, and get acknowledged, resolved and written up.
 
-It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, and (in later slices) a serverless alert pipeline and Terraform-managed AWS infrastructure.
+It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack) and, in a later slice, Terraform-managed AWS infrastructure.
 
 The project is built in **vertical slices**. Each slice ships end to end (UI → API → DB, tested, CI green) before the next one starts.
 
@@ -13,7 +13,7 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 1 | Walking skeleton: incident-service, Angular shell, Postgres, Docker Compose, CI | ✅ Shipped |
 | 2 | Auth: auth-service, gateway, JWT, roles, guards | ✅ Shipped |
 | 3 | Incident lifecycle: state machine, timeline, optimistic locking, Testcontainers | ✅ Shipped |
-| 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | Planned |
+| 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | ✅ Shipped |
 | 5 | Notifications: notification-service, Slack, Resilience4j | Planned |
 | 6 | Postmortems: editor, S3 presigned uploads | Planned |
 | 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | Planned |
@@ -23,6 +23,13 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 
 ```mermaid
 flowchart LR
+    monitor([Monitoring tool]) -->|"POST /alerts<br/>X-Beacon-Ingest-Key"| apigw
+    subgraph aws["AWS (LocalStack locally)"]
+        apigw["API Gateway"] --> lambda["alert-ingest Lambda<br/>Java 21: validate,<br/>fingerprint"]
+        lambda --> sqs[["SQS beacon-alerts"]]
+        sqs -.->|"3 failed receives"| dlq[["SQS beacon-alerts-dlq"]]
+    end
+    sqs -->|"@SqsListener"| incident
     browser([Browser]) -->|":4200"| web["web<br/>nginx + Angular build"]
     web -->|"/api/*"| gateway["gateway :8080<br/>Spring Cloud Gateway<br/>JWT check · rate limits"]
     gateway -->|"/api/auth/**<br/>/api/users/**"| auth["auth-service :8082<br/>users · tokens"]
@@ -36,6 +43,7 @@ flowchart LR
 - **One origin.** nginx serves the Angular bundle and proxies `/api` to the gateway, so the browser needs no CORS. The refresh cookie can also be `SameSite=Strict`.
 - **The gateway is the only way in.** It rejects requests without a valid token and rate-limits clients. The services behind it are not published to the host.
 - **Each service owns one schema** in a shared Postgres. Neither reads the other's tables.
+- **Alerts never go through the gateway.** Monitoring tools post to API Gateway with a shared ingest key; the Lambda only validates and queues, and incident-service consumes the queue at its own pace. A burst of alerts, or incident-service being down, just means a longer queue.
 
 ### How authentication works
 
@@ -81,6 +89,37 @@ stateDiagram-v2
   An integration test fires eight concurrent acknowledges at one incident and checks that exactly one wins and exactly one timeline entry is written.
 - **The UI reacts to the 409.** It reloads the incident and its timeline, keeps whatever the user had typed, and says that someone else changed it. The user then decides again with the current state in front of them.
 
+### How alerts become incidents
+
+```mermaid
+sequenceDiagram
+    participant M as Monitoring tool
+    participant L as Lambda (behind API Gateway)
+    participant Q as SQS
+    participant I as incident-service
+    participant DB as Postgres
+    M->>L: POST /alerts {source, title, severity, fingerprint?}
+    L->>L: check ingest key, validate, fingerprint = sha256(source + title) unless given
+    L->>Q: AlertMessage {alertId, fingerprint, …, receivedAt}
+    L-->>M: 202 {alertId, fingerprint}
+    Q->>I: deliver (at least once)
+    I->>DB: alert id seen before? → done (redelivery)
+    I->>DB: open incident with this fingerprint? → count the alert against it
+    I->>DB: otherwise open a new incident, Triggered by "alert:<source>"
+    I-->>Q: delete the message (only after the transaction committed)
+```
+
+- **Deduplication.** While an incident is open, every alert with its fingerprint is folded into it: `alertCount` goes up and `lastAlertAt` moves forward. Once it is resolved, the next alert opens a new incident. The first alert decides the title and severity; repeats never change what a responder may already be acting on.
+- **Exactly-once effect on an at-least-once queue.** SQS standard queues can deliver a message twice. Every alert is stored under the id the Lambda gave it, so a redelivery hits the primary key and changes nothing.
+- **Concurrent alerts for one problem open exactly one incident.** A partial unique index allows one open incident per fingerprint. When two alerts race, one insert fails; the listener retries once in a fresh transaction, sees the winner's incident and folds into it.
+- **Repeats don't make anyone's copy stale.** The alert count is bumped with a single `UPDATE … SET alert_count = alert_count + 1`, which does not touch the `@Version` column. A noisy alert never turns a responder's acknowledge into a 409.
+- **Failures go to the dead-letter queue.** A message is deleted only once it has been processed. An unreadable message, or one that keeps failing (say, the database is down), is retried by SQS and, after three receives, parked in `beacon-alerts-dlq` for inspection.
+- **Alert-to-incident latency is measured, not guessed.** The Lambda stamps each alert with API Gateway's receive time. After the transaction commits, incident-service records the time since then in the `beacon.alerts.latency` timer, tagged by outcome.
+  - Count and total time are at `/actuator/metrics/beacon.alerts.latency`.
+  - p50/p95/p99 are a separate gauge: `/actuator/metrics/beacon.alerts.latency.percentile?tag=phi:0.95`. It covers a sliding window of about two minutes, so read it while alerts are flowing.
+  - Both need a bearer token for any role. The gateway doesn't route `/actuator`, so query the service directly, e.g. `docker compose exec incident-service curl -H "Authorization: Bearer $TOKEN" localhost:8081/actuator/metrics/...`.
+- **The dashboard is live.** It polls every 5 seconds while the tab is visible and refreshes as soon as you come back to it. Polling was chosen over WebSockets or SSE because it needs nothing new in the gateway, nginx or CloudFront, and a few seconds of delay is fine for this use. A slow response is never stacked on (`exhaustMap`), and a poll that started before you created an incident can't hide it again.
+
 ## Quick start
 
 The only prerequisite is Docker (Docker Desktop, or Docker Engine with Compose v2).
@@ -103,6 +142,7 @@ Open http://localhost:4200 and sign in with one of the demo accounts. The passwo
 | API (gateway) | http://localhost:8080/api |
 | Gateway health | http://localhost:8080/actuator/health/readiness |
 | Postgres | `localhost:5433` (user/password/db: `beacon`) |
+| Alert endpoint (LocalStack API Gateway) | http://localhost:4566/_aws/execute-api/beacon/local/alerts |
 
 Every setting has a working local default. To override anything, copy `.env.example` to `.env`; `.env` is git-ignored.
 
@@ -127,6 +167,16 @@ curl -X POST localhost:8080/api/incidents/$ID/acknowledge \
 curl localhost:8080/api/incidents/$ID/timeline -H "Authorization: Bearer $TOKEN"
 ```
 
+Send an alert the way a monitoring tool would, then send it again and watch the dashboard. The second one folds into the same incident:
+
+```bash
+curl -i -X POST localhost:4566/_aws/execute-api/beacon/local/alerts \
+  -H 'X-Beacon-Ingest-Key: local-ingest-key' -H 'Content-Type: application/json' \
+  -d '{"source": "prometheus", "title": "Checkout p99 above 2s", "severity": "HIGH"}'
+```
+
+The first alert after startup takes a few seconds, because LocalStack starts the Lambda's runtime container (a cold start). After that, it takes well under a second.
+
 `scripts/smoke-test.sh` runs the same kind of checks against any running stack (it needs `jq`). CI runs it too.
 
 Stop with `docker compose down`. Add `-v` to also delete the database volume.
@@ -140,8 +190,8 @@ Run Postgres in Docker and the apps on your machine, with hot reload.
 From the repo root:
 
 ```bash
-# Database only
-docker compose up -d postgres
+# Database and the AWS emulator (the alert queue)
+docker compose up -d postgres localstack
 
 # Once: install the parent POM and security-common so single-module runs can resolve them
 cd backend && ./mvnw install -DskipTests && cd ..
@@ -194,10 +244,21 @@ incident-service's integration tests also run against a real Postgres:
 - a deterministic case where only the `@Version` column can stop a lost update
 - the V2 migration run against a database that already holds V1 data, checking the backfill and the new constraints
 
+The alert pipeline is tested at each hop:
+- **The Lambda as plain Java:** the ingest key, validation, fingerprints, header case, base64 bodies, the 415 for non-JSON, and a check that rejections never log the key.
+- **Its SQS publisher against LocalStack's real SQS API.**
+- **The contract module:** pins the exact JSON of an `AlertMessage`. It is the format of messages already sitting in a queue, so changing it has to be deliberate.
+- **incident-service's listener against LocalStack SQS (with a DLQ) and Postgres:**
+  - first alert, repeats and resolve-then-repeat
+  - a redelivered message counted once
+  - 20 alerts sent in one burst
+  - eight deliveries released at the same instant, which fight over the unique index and settle through the retry
+  - a poison message that ends up in the dead-letter queue
+
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
-- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline.
+- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. Finally it sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it.
 
 ## API
 
@@ -219,6 +280,12 @@ All endpoints go through the gateway. Errors use [RFC 7807](https://www.rfc-edit
 | `GET` | `/api/incidents/{id}/timeline` | VIEWER | Everything that happened to the incident, oldest first: type, actor, time, note. |
 | `POST` | `/api/incidents/{id}/notes` | RESPONDER | `{text}`. Appends a note to the timeline. `201`. Notes don't change the incident, so they need no version. |
 
+Alerts have their own endpoint, served by API Gateway and the Lambda, not by the gateway:
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/alerts` | `X-Beacon-Ingest-Key` | `{source, title, severity, description?, fingerprint?}` → `202 {alertId, fingerprint}`. `400`/`401`/`415` as problem details. |
+
 Roles are hierarchical, ADMIN > RESPONDER > VIEWER, so "RESPONDER" means RESPONDER or ADMIN.
 
 A validation failure is a `400` whose problem body lists each bad field, which the UI shows next to the matching input:
@@ -233,8 +300,10 @@ A validation failure is a `400` whose problem body lists each bad field, which t
 ```
 backend/                Maven multi-module build
   security-common/      The JWT contract: roles, claim names, claims→authorities mapping, role hierarchy
+  alert-contract/       The SQS message between the Lambda and incident-service, and its JSON codec
+  alert-ingest-lambda/  AWS Lambda (plain Java 21, no Spring): validates alerts and queues them
   auth-service/         Users, login, access/refresh tokens, JWKS
-  incident-service/     Incidents: api/ (controllers, DTO records), service/, domain/ (entities, repositories)
+  incident-service/     Incidents: api/ (controllers, DTO records), service/, ingest/ (SQS listener), domain/
   gateway/              Spring Cloud Gateway: routes, JWT check, in-memory rate limiter
   Dockerfile            One multi-stage Dockerfile for every service (--build-arg SERVICE=...)
 frontend/               Angular 22 app (standalone components, signals, zoneless)
@@ -242,12 +311,13 @@ frontend/               Angular 22 app (standalone components, signals, zoneless
   src/app/login/        Login page
   src/app/incidents/    Feature folder: API client, stores, dashboard, table, form, detail page, timeline
   nginx/                nginx config used by the frontend container
+infra/localstack/       LocalStack image + init script: API Gateway, the Lambda, SQS queue and DLQ
 scripts/smoke-test.sh   End-to-end checks against a running stack
 docker-compose.yml      The whole local stack
 .github/workflows/      CI
 ```
 
-Later slices add `infra/` (Terraform), `lambda/` (alert ingestion), `e2e/` (Playwright) and `load/` (k6).
+Later slices add `infra/terraform/`, `e2e/` (Playwright) and `load/` (k6).
 
 ## Configuration
 
@@ -265,6 +335,10 @@ Services read their configuration from environment variables. The `local` Spring
 | `AUTH_SERVICE_URL`, `INCIDENT_SERVICE_URL` | gateway | the Compose service names |
 | `TRUSTED_PROXY_HOPS` | gateway | `1` (nginx) |
 | `RATE_LIMIT_LOGIN_CAPACITY`, `RATE_LIMIT_API_CAPACITY` | gateway | `10` per minute per IP, `100` per 10 s per user |
+| `INGEST_API_KEY` | alert Lambda | `local-ingest-key` |
+| `ALERT_QUEUE` | incident-service | `beacon-alerts` |
+| `SPRING_CLOUD_AWS_SQS_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | incident-service | LocalStack (`http://localstack:4566`, `us-east-1`, `test`/`test`); in AWS no endpoint and the instance role's credentials |
+| `LOCALSTACK_PORT` | LocalStack | `4566`, bound to `127.0.0.1` |
 | `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k` |
 
 No secrets are committed. Real credentials come from GitHub Actions secrets and, once deployed, AWS.
@@ -315,10 +389,19 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 - **Time comes from an injected `Clock`**, truncated to Postgres' microsecond precision. Tests are deterministic, and a create response matches a later read exactly.
 - **JVM sizing is decided up front.** The AWS deployment runs several services on one 1 GB t3.micro, so the images default to SerialGC and a percentage-based heap.
 
+### AWS and LocalStack
+
+- **The Lambda is plain Java, with no Spring.** Every class it loads costs cold-start time. It uses the JDK's HTTP client instead of Netty or Apache and is shaded into one 8 MB jar. The logic sits in `AlertIngestor`, which knows nothing about Lambda; `AlertIngestHandler` only adapts API Gateway events to it.
+- **The SQS message format lives in one module.** The Lambda writes with `AlertMessageCodec` and the listener reads with it. One test pins the exact JSON and another proves that unknown fields are ignored, so producer and consumer can be deployed independently.
+- **LocalStack is pinned to 4.14,** the last release that runs without an account token: releases from 2026.03 on require one. Docker Compose and Testcontainers use the same version.
+- **Locally, LocalStack runs real Lambda containers.** It needs the Docker socket for that, which is a local-only convenience. Its port is bound to `127.0.0.1`. LocalStack keeps state in memory, so alerts still queued when it restarts are lost; in AWS, SQS is durable.
+- **incident-service refuses to start if its queue is missing** (`queue-not-found-strategy: fail`). By default Spring Cloud AWS would create the queue, without the dead-letter queue, and hide a misconfigured deployment.
+
 ### Frontend
 
 - **Stores are plain signals services** (`AuthStore`, `IncidentStore`): private writable state, public `computed` selectors, and methods as the only way to change state. That is enough structure for this app without the NgRx boilerplate. `IncidentStore` clears itself when the user signs out.
 - **Route guards use `canMatch`, not `canActivate`**, so a signed-out visitor never downloads the lazy-loaded feature chunk. After login the user returns to `returnUrl`, which only accepts in-app paths.
 - **Role checks in the UI are a courtesy.** Viewers don't see the trigger form or the acknowledge/resolve controls, but the API is what enforces it. The buttons shown follow the same transition table as the backend (`canAcknowledge`, `canResolve`).
 - **The detail page has its own store**, provided by the component rather than in root, so it lives and dies with the page. Commands return cold Observables, so nothing happens until the component subscribes. After every command the store reloads the incident and its timeline, so the page shows what the server has, not a guess.
+- **nginx re-resolves the gateway's address.** It uses Docker's DNS resolver and a variable `proxy_pass`. With a plain hostname, nginx looks the address up once at startup and answers 502 after the gateway container is recreated.
 - **OnPush everywhere.** OnPush is Angular 22's default, but components still declare it explicitly so readers who know older Angular can see it.

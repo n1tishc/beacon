@@ -16,6 +16,12 @@ export interface Incident {
   updatedAt: string;
   acknowledgedAt: string | null;
   resolvedAt: string | null;
+  /** The monitoring system that opened it; null when a person triggered it. */
+  source: string | null;
+  fingerprint: string | null;
+  /** How many alerts were folded into this incident (0 for manual incidents). */
+  alertCount: number;
+  lastAlertAt: string | null;
 }
 
 /**
