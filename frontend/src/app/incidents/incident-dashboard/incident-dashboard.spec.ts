@@ -41,6 +41,8 @@ describe('IncidentDashboard', () => {
     const fixture = TestBed.createComponent(IncidentDashboard);
     fixture.detectChanges();
     http.expectOne((request) => request.url === '/api/incidents').flush(response);
+    // Channel status loads on its own (it has its own spec).
+    http.expectOne('/api/notifications/channels').flush([]);
     await fixture.whenStable();
     return fixture.nativeElement as HTMLElement;
   }

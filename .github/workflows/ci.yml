@@ -69,9 +69,16 @@ jobs:
       - name: Build images and start the stack
         run: docker compose up --build --detach --wait --wait-timeout 360
       # Logs in as each demo role through nginx -> gateway -> services, walks an incident through its
-      # lifecycle, and sends alerts through API Gateway -> Lambda -> SQS (LocalStack) -> incident-service.
+      # lifecycle, checks its notifications, and sends alerts through API Gateway -> Lambda -> SQS
+      # (LocalStack) -> incident-service.
       - name: Smoke test through the web proxy
         run: scripts/smoke-test.sh http://localhost:4200
+      # Slack goes away: incidents and alerts must keep working, Slack deliveries fail and its
+      # circuit breaker opens, visible through the API.
+      - name: Smoke test with Slack down
+        run: |
+          docker compose stop fake-slack
+          EXPECT_SLACK=down scripts/smoke-test.sh http://localhost:4200
       - name: Service logs
         if: failure()
         run: docker compose logs

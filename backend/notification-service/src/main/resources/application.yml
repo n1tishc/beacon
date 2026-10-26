@@ -1,0 +1,101 @@
+# Base configuration. Anything environment-specific comes from env vars;
+# the `local` profile supplies defaults for running on a laptop.
+spring:
+  application:
+    name: notification-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: notification
+  # Each service owns one schema in the shared database and never touches another's tables.
+  flyway:
+    schemas: notification
+    default-schema: notification
+  mvc:
+    # Validation errors and other MVC exceptions as RFC 7807 problem responses.
+    problemdetails:
+      enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys come from auth-service; tokens must also carry this issuer.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8082/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:beacon-auth}
+
+beacon:
+  notifications:
+    service-token: ${NOTIFICATION_SERVICE_TOKEN}
+    # A secret: never commit a real one. Empty turns the Slack channel off.
+    slack-webhook-url: ${SLACK_WEBHOOK_URL:}
+    public-url: ${BEACON_PUBLIC_URL:http://localhost:4200}
+
+# Worst case for one Slack delivery: 3 attempts x 2 s + 0.5 s + 1 s of backoff = 7.5 s.
+# incident-service's timeout for calling this service is set above that (see its application.yml).
+resilience4j:
+  timelimiter:
+    instances:
+      slack:
+        timeout-duration: 2s
+  circuitbreaker:
+    instances:
+      slack:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 4
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
+        # Move to HALF_OPEN on time, not on the next call, so the state the UI shows is current.
+        automatic-transition-from-open-to-half-open-enabled: true
+        # Only availability problems count. A 4xx (SlackRejectedException) means Slack is up.
+        record-exceptions:
+          - org.springframework.web.reactive.function.client.WebClientResponseException
+          - org.springframework.web.reactive.function.client.WebClientRequestException
+          - java.util.concurrent.TimeoutException
+        register-health-indicator: true
+        # Slack being down must not mark this service down: it still records every notification.
+        allow-health-indicator-to-fail: false
+  retry:
+    instances:
+      slack:
+        max-attempts: 3
+        wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        # Not retried: 4xx (it will not change) and an open circuit (that is the point of it).
+        retry-exceptions:
+          - org.springframework.web.reactive.function.client.WebClientResponseException
+          - org.springframework.web.reactive.function.client.WebClientRequestException
+          - java.util.concurrent.TimeoutException
+
+server:
+  port: ${PORT:8083}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,circuitbreakers,circuitbreakerevents
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    circuitbreakers:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

@@ -10,6 +10,7 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 
 import { AuthStore } from '../../core/auth/auth-store';
+import { ChannelStatusBar } from '../../notifications/channel-status/channel-status';
 import { CreateIncidentForm } from '../create-incident-form/create-incident-form';
 import { IncidentStore } from '../incident-store';
 import { IncidentTable } from '../incident-table/incident-table';
@@ -17,7 +18,7 @@ import { IncidentTable } from '../incident-table/incident-table';
 @Component({
   selector: 'app-incident-dashboard',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CreateIncidentForm, DatePipe, IncidentTable],
+  imports: [ChannelStatusBar, CreateIncidentForm, DatePipe, IncidentTable],
   templateUrl: './incident-dashboard.html',
   styleUrl: './incident-dashboard.scss',
 })

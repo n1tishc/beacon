@@ -11,6 +11,7 @@
         </span>
       }
     </p>
+    <app-channel-status />
   </div>
   <button type="button" (click)="store.load()" [disabled]="store.loading()">
     {{ store.loading() ? 'Refreshing…' : 'Refresh' }}

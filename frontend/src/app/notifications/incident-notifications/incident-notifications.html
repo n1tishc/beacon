@@ -1,0 +1,43 @@
+@if (failing() && !notifications()) {
+  <p class="muted" data-testid="notifications-unavailable">
+    Notification status is unavailable right now.
+  </p>
+} @else if (notifications(); as notifications) {
+  @if (notifications.length === 0) {
+    <p class="muted">No notifications yet.</p>
+  } @else {
+    <ul>
+      @for (notification of notifications; track notification.id) {
+        <li data-testid="notification">
+          <div class="row">
+            <span class="what">
+              <strong>{{ channelLabels[notification.channel] }}</strong>
+              · {{ eventLabels[notification.eventType] }}
+            </span>
+            <span
+              class="delivery delivery-{{ notification.status | lowercase }}"
+              data-testid="delivery-status"
+              >{{ statusLabels[notification.status] }}</span
+            >
+          </div>
+          @if (notification.status === 'FAILED' || notification.status === 'SKIPPED') {
+            <p class="detail">
+              {{ notification.detail }}
+              @if (notification.attempts > 1) {
+                <span class="attempts">({{ notification.attempts }} attempts)</span>
+              }
+            </p>
+          }
+          <time class="when" [attr.datetime]="notification.updatedAt">{{
+            notification.updatedAt | date: 'MMM d, HH:mm:ss'
+          }}</time>
+        </li>
+      }
+    </ul>
+    @if (failing()) {
+      <p class="muted stale">Could not refresh; showing the last known status.</p>
+    }
+  }
+} @else {
+  <p class="muted">Loading…</p>
+}

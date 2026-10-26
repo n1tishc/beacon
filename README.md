@@ -4,7 +4,7 @@
 
 Beacon is a small incident management platform in the spirit of PagerDuty. Alerts come in, become incidents, and get acknowledged, resolved and written up.
 
-It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack) and, in a later slice, Terraform-managed AWS infrastructure.
+It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack), Slack notifications behind **Resilience4j** circuit breakers and, in a later slice, Terraform-managed AWS infrastructure.
 
 The project is built in **vertical slices**. Each slice ships end to end (UI → API → DB, tested, CI green) before the next one starts.
 
@@ -14,7 +14,7 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 2 | Auth: auth-service, gateway, JWT, roles, guards | ✅ Shipped |
 | 3 | Incident lifecycle: state machine, timeline, optimistic locking, Testcontainers | ✅ Shipped |
 | 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | ✅ Shipped |
-| 5 | Notifications: notification-service, Slack, Resilience4j | Planned |
+| 5 | Notifications: notification-service, Slack + mock sink, Resilience4j circuit breaker | ✅ Shipped |
 | 6 | Postmortems: editor, S3 presigned uploads | Planned |
 | 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | Planned |
 | 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | Planned |
@@ -34,15 +34,21 @@ flowchart LR
     web -->|"/api/*"| gateway["gateway :8080<br/>Spring Cloud Gateway<br/>JWT check · rate limits"]
     gateway -->|"/api/auth/**<br/>/api/users/**"| auth["auth-service :8082<br/>users · tokens"]
     gateway -->|"/api/incidents/**"| incident["incident-service :8081<br/>incidents · timeline"]
+    gateway -->|"/api/notifications/**"| notification["notification-service :8083<br/>delivery status"]
+    incident -->|"after commit, async<br/>POST /internal/notifications<br/>service token · circuit breaker"| notification
+    notification -->|"webhook · circuit breaker"| slack(["Slack<br/>(fake-slack locally)"])
+    notification --> mock(["mock sink<br/>(log)"])
     gateway -.->|"public keys (JWKS)"| auth
     incident -.->|"public keys (JWKS)"| auth
-    auth --> pg[("PostgreSQL 17<br/>schemas: auth, incident")]
+    auth --> pg[("PostgreSQL 17<br/>schemas: auth, incident,<br/>notification")]
     incident --> pg
+    notification --> pg
 ```
 
 - **One origin.** nginx serves the Angular bundle and proxies `/api` to the gateway, so the browser needs no CORS. The refresh cookie can also be `SameSite=Strict`.
 - **The gateway is the only way in.** It rejects requests without a valid token and rate-limits clients. The services behind it are not published to the host.
-- **Each service owns one schema** in a shared Postgres. Neither reads the other's tables.
+- **Each service owns one schema** in a shared Postgres. None reads another's tables.
+- **Notifications are a side effect, never a dependency.** incident-service tells notification-service about a change only after it has committed, on a background thread. Neither Slack nor notification-service being down can fail or slow down an incident.
 - **Alerts never go through the gateway.** Monitoring tools post to API Gateway with a shared ingest key; the Lambda only validates and queues, and incident-service consumes the queue at its own pace. A burst of alerts, or incident-service being down, just means a longer queue.
 
 ### How authentication works
@@ -120,6 +126,48 @@ sequenceDiagram
   - Both need a bearer token for any role. The gateway doesn't route `/actuator`, so query the service directly, e.g. `docker compose exec incident-service curl -H "Authorization: Bearer $TOKEN" localhost:8081/actuator/metrics/...`.
 - **The dashboard is live.** It polls every 5 seconds while the tab is visible and refreshes as soon as you come back to it. Polling was chosen over WebSockets or SSE because it needs nothing new in the gateway, nginx or CloudFront, and a few seconds of delay is fine for this use. A slow response is never stacked on (`exhaustMap`), and a poll that started before you created an incident can't hide it again.
 
+### How notifications work, and how they fail
+
+```mermaid
+sequenceDiagram
+    participant I as incident-service
+    participant N as notification-service
+    participant DB as Postgres (notification)
+    participant S as Slack webhook
+    I->>I: commit the change (API command or alert)
+    I-)N: after commit, on a virtual thread: POST /internal/notifications {eventId, …}
+    N->>DB: one PENDING row per channel (unique on eventId + channel)
+    N->>N: mock sink: log the message → SENT
+    N->>S: POST {text}: time limit, circuit breaker, retry
+    S-->>N: 200, or 5xx / timeout / no connection
+    N->>DB: SENT, FAILED (with why) or SKIPPED (circuit open)
+    N-->>I: 200 with the outcome per channel
+```
+
+- **What notifies.** Triggered, acknowledged and resolved, whether a person or an alert caused it. Notes don't, and neither do repeat alerts folded into an open incident. Every change goes through one `IncidentEventRecorder`, which writes the timeline entry and publishes the event, so the API and the alert listener can't drift apart. Whether an event notifies is an exhaustive `switch` over the sealed `IncidentEvent`, so a new event type has to decide.
+- **After commit, off the request thread.** A `@TransactionalEventListener(AFTER_COMMIT)` plus `@Async` (on virtual threads) means:
+  - a rolled-back change never notifies anyone (an alert that lost a race and is retried, say);
+  - neither the API response nor the SQS listener waits for notification-service, and nothing it does can fail them. A test points incident-service at a notification-service that hangs: the API answers while that notification is still being retried in the background.
+- **The same three Resilience4j layers on both hops**, as Reactor operators so the order is visible in code. Innermost first:
+  1. a **time limiter** per attempt (Slack 2 s; notification-service 10 s), so a timeout counts as a failure;
+  2. a **circuit breaker** that counts every attempt. After 4 calls (Slack) or 5 (notification-service) with at least half failed, it opens, and calls fail at once without touching the remote side for 30 s. Then 2 trial calls decide whether it closes again;
+  3. **retry**, outermost: 3 attempts with exponential backoff, only for 5xx, connection errors and timeouts. A 4xx (a revoked webhook, a wrong service token) is neither retried nor counted against the circuit, because Slack being up and rejecting us is not an outage.
+
+  The fallback is a `catch` around all three. Putting it on the circuit breaker would hide failures from Retry.
+- **Timeouts are budgeted, not guessed.** One Slack delivery takes at most 3 × 2 s + 1.5 s of backoff = 7.5 s. incident-service gives one call to notification-service 10 s, so it never retries a request that is still legitimately working on Slack.
+- **Idempotent on the receiving side.** The request carries the timeline entry's id. notification-service stores it with a unique constraint per channel, so a retry after a lost response returns the first outcome and never posts to Slack twice.
+- **Every outcome is recorded and visible.** Rows are written as PENDING before any channel is called, then become SENT, FAILED (with the reason and number of attempts) or SKIPPED (circuit open). The incident page lists them, and the dashboard shows each channel with Slack's circuit state. Error messages never include the webhook URL, which is a secret.
+- **The service-to-service hop has its own credential.** `/internal/**` accepts only the shared `NOTIFICATION_SERVICE_TOKEN` (compared in constant time), a user's JWT doesn't open it, and the gateway has no route to it. One shared secret is enough for one caller; with more, the next step is short-lived service tokens from auth-service (OAuth2 client credentials).
+- **Tradeoff: delivery is best effort.** If notification-service is unreachable for all three attempts, or its circuit is open, incident-service drops that notification and counts it in `beacon.notifications.dropped`. A FAILED Slack delivery isn't retried later either. The incident, the thing that matters, is always saved. Guaranteed delivery would mean a transactional outbox on both sides; for a pager that would be the next step. Two more consequences of the same choice:
+  - Deliveries run concurrently, so Slack can show "resolved" just before "triggered" when they are seconds apart.
+  - If notification-service dies mid-delivery, that row stays PENDING; nothing sweeps it up.
+- **Circuit state through Actuator.** `circuitbreakers`, `circuitbreakerevents` and the `circuitBreakers` health component are exposed on both services; like metrics, they need a bearer token. An open circuit shows as `CIRCUIT_OPEN` but doesn't mark the service down (`allow-health-indicator-to-fail: false`), and readiness only covers the service itself, so a Slack outage never takes notification-service out of rotation.
+
+  ```bash
+  docker compose exec notification-service curl -s -H "Authorization: Bearer $TOKEN" localhost:8083/actuator/circuitbreakers
+  ```
+- **Delivery counts are metrics.** `beacon.notifications.deliveries` (tags `channel`, `status`) in notification-service, `beacon.notifications.dropped` in incident-service.
+
 ## Quick start
 
 The only prerequisite is Docker (Docker Desktop, or Docker Engine with Compose v2).
@@ -143,6 +191,7 @@ Open http://localhost:4200 and sign in with one of the demo accounts. The passwo
 | Gateway health | http://localhost:8080/actuator/health/readiness |
 | Postgres | `localhost:5433` (user/password/db: `beacon`) |
 | Alert endpoint (LocalStack API Gateway) | http://localhost:4566/_aws/execute-api/beacon/local/alerts |
+| What was "posted to Slack" (fake-slack) | http://localhost:8089/__admin/requests |
 
 Every setting has a working local default. To override anything, copy `.env.example` to `.env`; `.env` is git-ignored.
 
@@ -177,6 +226,16 @@ curl -i -X POST localhost:4566/_aws/execute-api/beacon/local/alerts \
 
 The first alert after startup takes a few seconds, because LocalStack starts the Lambda's runtime container (a cold start). After that, it takes well under a second.
 
+Every change also notifies Slack, which locally is the `fake-slack` container (WireMock, answering like a Slack webhook), and the mock sink, which logs to `docker compose logs notification-service`. To see an outage handled:
+
+```bash
+docker compose stop fake-slack     # trigger or acknowledge a few incidents: they still work,
+                                   # Slack deliveries fail, then the dashboard shows "Circuit open"
+docker compose start fake-slack    # about 30 s later trial calls go through and the circuit closes
+```
+
+To post to a real workspace, put its incoming-webhook URL in `.env` as `SLACK_WEBHOOK_URL`.
+
 `scripts/smoke-test.sh` runs the same kind of checks against any running stack (it needs `jq`). CI runs it too.
 
 Stop with `docker compose down`. Add `-v` to also delete the database volume.
@@ -206,7 +265,10 @@ cd backend && ./mvnw -pl auth-service spring-boot:run -Dspring-boot.run.profiles
 # incident-service on :8081
 cd backend && ./mvnw -pl incident-service spring-boot:run -Dspring-boot.run.profiles=local
 
-# gateway on :8080 (defaults already point at the two services on localhost)
+# notification-service on :8083 (no Slack webhook unless SLACK_WEBHOOK_URL is set; the mock sink always works)
+cd backend && ./mvnw -pl notification-service spring-boot:run -Dspring-boot.run.profiles=local
+
+# gateway on :8080 (defaults already point at the services on localhost)
 cd backend && ./mvnw -pl gateway spring-boot:run
 
 # Frontend on :4200 (ng serve proxies /api to the gateway, see frontend/proxy.conf.json)
@@ -255,10 +317,14 @@ The alert pipeline is tested at each hop:
   - eight deliveries released at the same instant, which fight over the unique index and settle through the retry
   - a poison message that ends up in the dead-letter queue
 
+Notifications are tested from both ends, each against a real Postgres and WireMock standing in for the other side:
+- **notification-service against a fake Slack:** delivered; a 500 retried and then sent; Slack down (FAILED after 3 attempts, the mock sink still SENT, the request still 200); a slow Slack timing out; a 404 not retried and not counted against the circuit; the circuit opening, Slack no longer called (request count stops), Actuator showing OPEN while health stays UP; recovery through HALF_OPEN to CLOSED; a repeated event answered from the record without a second post; and the service token, which opens only `/internal/**`.
+- **incident-service against a fake notification-service:** every lifecycle change sent after commit, with the service token, in the exact JSON notification-service reads (notes not sent); incidents created while it returns 500s; the API answering while it hangs; its circuit opening; a 401 not retried; and an alert notifying while its repeats don't.
+
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
-- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. Finally it sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it.
+- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. Finally it sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
 
 ## API
 
@@ -279,6 +345,11 @@ All endpoints go through the gateway. Errors use [RFC 7807](https://www.rfc-edit
 | `POST` | `/api/incidents/{id}/resolve` | RESPONDER | `{version, note?}`. Same `409`s as acknowledge. |
 | `GET` | `/api/incidents/{id}/timeline` | VIEWER | Everything that happened to the incident, oldest first: type, actor, time, note. |
 | `POST` | `/api/incidents/{id}/notes` | RESPONDER | `{text}`. Appends a note to the timeline. `201`. Notes don't change the incident, so they need no version. |
+
+| `GET` | `/api/notifications?incidentId` | VIEWER | The incident's notifications, oldest first: event, channel, status (`PENDING`, `SENT`, `FAILED`, `SKIPPED`), attempts, failure reason, message. |
+| `GET` | `/api/notifications/channels` | VIEWER | Each channel, whether it is configured, and Slack's circuit state (`CLOSED`, `OPEN`, `HALF_OPEN`). |
+
+notification-service also has `POST /internal/notifications`, for incident-service only: it takes the service token, not a user's, and the gateway doesn't route it.
 
 Alerts have their own endpoint, served by API Gateway and the Lambda, not by the gateway:
 
@@ -304,14 +375,17 @@ backend/                Maven multi-module build
   alert-ingest-lambda/  AWS Lambda (plain Java 21, no Spring): validates alerts and queues them
   auth-service/         Users, login, access/refresh tokens, JWKS
   incident-service/     Incidents: api/ (controllers, DTO records), service/, ingest/ (SQS listener), domain/
+  notification-service/ Slack + mock sink channels behind Resilience4j, delivery records, internal API
   gateway/              Spring Cloud Gateway: routes, JWT check, in-memory rate limiter
   Dockerfile            One multi-stage Dockerfile for every service (--build-arg SERVICE=...)
 frontend/               Angular 22 app (standalone components, signals, zoneless)
   src/app/core/auth/    Auth store, interceptor, guards
   src/app/login/        Login page
   src/app/incidents/    Feature folder: API client, stores, dashboard, table, form, detail page, timeline
+  src/app/notifications/ Notification panel for the detail page, channel status for the dashboard
   nginx/                nginx config used by the frontend container
 infra/localstack/       LocalStack image + init script: API Gateway, the Lambda, SQS queue and DLQ
+infra/fake-slack/       WireMock mapping that answers like a Slack incoming webhook
 scripts/smoke-test.sh   End-to-end checks against a running stack
 docker-compose.yml      The whole local stack
 .github/workflows/      CI
@@ -325,20 +399,24 @@ Services read their configuration from environment variables. The `local` Spring
 
 | Variable | Used by | Default (Compose) |
 |----------|---------|-------------------|
-| `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | auth-service, incident-service | the Compose Postgres, `beacon` / `beacon` |
+| `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | auth-service, incident-service, notification-service | the Compose Postgres, `beacon` / `beacon` |
 | `DEMO_USERS_ENABLED`, `DEMO_USER_PASSWORD` | auth-service | `true`, `beacon-demo` |
 | `JWT_SIGNING_KEY` | auth-service | empty, so a key is generated at startup |
 | `JWT_ISSUER` | all services | `beacon-auth` |
 | `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL` | auth-service | `15m`, `7d` |
 | `AUTH_SECURE_COOKIE` | auth-service | `false` locally (plain http); `true` by default otherwise |
-| `AUTH_JWKS_URI` | gateway, incident-service | `http://auth-service:8082/.well-known/jwks.json` |
-| `AUTH_SERVICE_URL`, `INCIDENT_SERVICE_URL` | gateway | the Compose service names |
+| `AUTH_JWKS_URI` | gateway, incident-service, notification-service | `http://auth-service:8082/.well-known/jwks.json` |
+| `AUTH_SERVICE_URL`, `INCIDENT_SERVICE_URL`, `NOTIFICATION_SERVICE_URL` | gateway (and incident-service for the last) | the Compose service names |
+| `NOTIFICATION_SERVICE_TOKEN` | incident-service, notification-service | `local-service-token`; required, neither starts without it |
+| `SLACK_WEBHOOK_URL` | notification-service | unset: the `fake-slack` container; set but empty: Slack off (mock sink only). A real one is a secret |
+| `BEACON_PUBLIC_URL` | notification-service | `http://localhost:4200`, for the link in each message |
 | `TRUSTED_PROXY_HOPS` | gateway | `1` (nginx) |
 | `RATE_LIMIT_LOGIN_CAPACITY`, `RATE_LIMIT_API_CAPACITY` | gateway | `10` per minute per IP, `100` per 10 s per user |
 | `INGEST_API_KEY` | alert Lambda | `local-ingest-key` |
 | `ALERT_QUEUE` | incident-service | `beacon-alerts` |
 | `SPRING_CLOUD_AWS_SQS_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | incident-service | LocalStack (`http://localstack:4566`, `us-east-1`, `test`/`test`); in AWS no endpoint and the instance role's credentials |
 | `LOCALSTACK_PORT` | LocalStack | `4566`, bound to `127.0.0.1` |
+| `FAKE_SLACK_PORT` | fake-slack | `8089`, bound to `127.0.0.1` |
 | `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k` |
 
 No secrets are committed. Real credentials come from GitHub Actions secrets and, once deployed, AWS.
@@ -399,6 +477,8 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 
 ### Frontend
 
+- **One polling helper.** `whileVisible()` ticks only while the tab is visible and right away when the user returns. The dashboard, the notification panel and the channel chips all poll through it, each with `exhaustMap` so a slow response is never stacked on.
+- **Notifications load separately from the incident.** If notification-service is down, the incident page still works and only its notification panel says the status is unavailable.
 - **Stores are plain signals services** (`AuthStore`, `IncidentStore`): private writable state, public `computed` selectors, and methods as the only way to change state. That is enough structure for this app without the NgRx boilerplate. `IncidentStore` clears itself when the user signs out.
 - **Route guards use `canMatch`, not `canActivate`**, so a signed-out visitor never downloads the lazy-loaded feature chunk. After login the user returns to `returnUrl`, which only accepts in-app paths.
 - **Role checks in the UI are a courtesy.** Viewers don't see the trigger form or the acknowledge/resolve controls, but the API is what enforces it. The buttons shown follow the same transition table as the backend (`canAcknowledge`, `canResolve`).

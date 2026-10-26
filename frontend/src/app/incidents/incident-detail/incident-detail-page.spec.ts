@@ -43,6 +43,9 @@ describe('IncidentDetailPage', () => {
     fixture.detectChanges();
     respond(incident, timeline);
     await fixture.whenStable();
+    // The notifications panel appears with the incident and loads on its own (it has its own spec).
+    http.expectOne((request) => request.url === '/api/notifications').flush([]);
+    await fixture.whenStable();
     return { fixture, element: fixture.nativeElement as HTMLElement };
   }
 

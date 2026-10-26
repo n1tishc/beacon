@@ -34,6 +34,17 @@ spring:
                   args:
                     rate-limiter: "#{@inMemoryRateLimiter}"
                     key-resolver: "#{@userOrClientIpKeyResolver}"
+            # Read-only notification views. notification-service's /internal/** has no route: only
+            # incident-service calls it, on the internal network, with its service token.
+            - id: notifications
+              uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/notifications/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    rate-limiter: "#{@inMemoryRateLimiter}"
+                    key-resolver: "#{@userOrClientIpKeyResolver}"
           httpclient:
             connect-timeout: 2000
             response-timeout: 10s

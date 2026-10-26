@@ -1,0 +1,15 @@
+@if (channels.value(); as channels) {
+  <ul aria-label="Notification channels">
+    @for (channel of channels; track channel.channel) {
+      <li
+        class="chip"
+        [class.degraded]="!healthy(channel)"
+        [class.off]="!channel.enabled"
+        data-testid="channel"
+      >
+        <span class="dot" aria-hidden="true"></span>
+        {{ channelLabels[channel.channel] }}: {{ describe(channel) }}
+      </li>
+    }
+  </ul>
+}
