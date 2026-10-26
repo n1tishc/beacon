@@ -1,0 +1,40 @@
+#!/bin/bash
+# First boot of the Beacon instance: Docker, Compose, a swapfile and the deploy script's settings.
+# The application itself arrives later, from the deploy job, through SSM Run Command.
+set -euxo pipefail
+
+dnf install -y docker jq amazon-ecr-credential-helper
+
+# Amazon Linux has no Compose plugin package: install a pinned release and check its checksum.
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL --retry 5 -o /usr/local/lib/docker/cli-plugins/docker-compose \
+  "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64"
+echo "${compose_sha256}  /usr/local/lib/docker/cli-plugins/docker-compose" | sha256sum --check
+chmod 755 /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Four JVMs on a 1 GiB instance: swap holds what they touched at startup and rarely since.
+if [[ ! -f /swapfile ]]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=${swap_size_mib}
+  chmod 600 /swapfile
+  mkswap /swapfile
+  echo '/swapfile none swap defaults 0 0' >>/etc/fstab
+fi
+swapon -a
+
+# Rotated container logs, so a chatty service cannot fill the disk.
+mkdir -p /etc/docker
+cat >/etc/docker/daemon.json <<'JSON'
+{ "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "3" } }
+JSON
+systemctl enable --now docker
+
+# Image pulls from ECR authenticate with the instance role (deploys run as root).
+mkdir -p /root/.docker
+echo '{ "credsStore": "ecr-login" }' >/root/.docker/config.json
+
+mkdir -p /opt/beacon
+cat >/opt/beacon/instance.env <<'ENV'
+AWS_REGION=${region}
+REGISTRY=${registry}
+PARAMETER_PATH=${parameter_path}
+ENV

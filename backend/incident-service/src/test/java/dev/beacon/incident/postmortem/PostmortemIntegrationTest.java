@@ -49,6 +49,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import dev.beacon.incident.PostgresTestcontainer;
 import dev.beacon.incident.domain.Incident;
 import dev.beacon.incident.domain.Severity;
+import dev.beacon.incident.service.AbandonedUploadCleanup;
 import dev.beacon.incident.service.IncidentService;
 import dev.beacon.security.Role;
 
@@ -106,6 +107,9 @@ class PostmortemIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private AbandonedUploadCleanup cleanup;
 
     @Test
     void writeThenReviseAPostmortem() throws Exception {
@@ -303,6 +307,38 @@ class PostmortemIntegrationTest {
         mvc.perform(get("/api/incidents/{id}/postmortem/attachments/{a}/download", id, attachmentId)
                         .with(caller("val", Role.VIEWER)))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void uploadsLeftUnfinishedAreDiscardedButNothingElse() throws Exception {
+        UUID id = resolvedIncident();
+        byte[] file = LOG.getBytes(StandardCharsets.UTF_8);
+        // Uploaded to S3 but never completed, two hours ago.
+        String abandoned = announce(id, "abandoned.txt", "text/plain", file.length)
+                .andReturn().getResponse().getContentAsString();
+        upload(abandoned, Map.of(), file);
+        // Finished two hours ago: a real attachment, however old.
+        String finished = announce(id, "finished.txt", "text/plain", file.length)
+                .andReturn().getResponse().getContentAsString();
+        upload(finished, Map.of(), file);
+        complete(id, JsonPath.read(finished, "$.attachment.id")).andExpect(status().isOk());
+        jdbc.update("update incident.attachments set created_at = now() - interval '2 hours' where incident_id = ?", id);
+        // Announced just now: its URL is still valid, so it must survive.
+        String inProgress = announce(id, "in-progress.txt", "text/plain", file.length)
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(cleanup.discardAbandonedUploads()).isGreaterThanOrEqualTo(1);
+
+        assertThat(jdbc.queryForList("select file_name from incident.attachments where incident_id = ? order by file_name",
+                String.class, id)).containsExactly("finished.txt", "in-progress.txt");
+        String abandonedKey = "incidents/" + id + "/attachments/" + JsonPath.read(abandoned, "$.attachment.id");
+        try {
+            s3.headObject(request -> request.bucket(BUCKET).key(abandonedKey));
+            throw new AssertionError("the abandoned object should have been deleted");
+        } catch (NoSuchKeyException expected) {
+            // deleted
+        }
+        assertThat(upload(inProgress, Map.of(), file).statusCode()).isEqualTo(200);
     }
 
     private UUID resolvedIncident() {

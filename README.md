@@ -4,7 +4,7 @@
 
 Beacon is a small incident management platform in the spirit of PagerDuty. Alerts come in, become incidents, and get acknowledged, resolved and written up.
 
-It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack), Slack notifications behind **Resilience4j** circuit breakers and, in a later slice, Terraform-managed AWS infrastructure.
+It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack), Slack notifications behind **Resilience4j** circuit breakers, and free-tier AWS infrastructure managed with **Terraform** and deployed by **GitHub Actions**.
 
 The project is built in **vertical slices**. Each slice ships end to end (UI → API → DB, tested, CI green) before the next one starts.
 
@@ -16,7 +16,7 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | ✅ Shipped |
 | 5 | Notifications: notification-service, Slack + mock sink, Resilience4j circuit breaker | ✅ Shipped |
 | 6 | Postmortems: editor, S3 presigned uploads | ✅ Shipped |
-| 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | Planned |
+| 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | 🟡 Built and validated offline; first live deploy pending an AWS account |
 | 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | Planned |
 
 ## Architecture (current slice)
@@ -208,7 +208,7 @@ sequenceDiagram
 - **The postmortem has its own `@Version`.** A save sends the version on screen, and a stale one gets `409 Postmortem changed`. Unlike an incident command, the page keeps the user's draft in the form, since it may be a lot of writing. It loads the other version and says who saved it, and the user either saves again to replace it or discards their draft. Someone saving a first draft when one already exists gets the same 409, rather than overwriting it; if two first drafts race to the database, the primary key stops the second.
 - **S3 being down costs attachments, not postmortems.** Any AWS SDK error becomes `503 File storage unavailable`; the text of the postmortem still saves.
 - **Tradeoffs:**
-  - An upload that is announced but never completed leaves a PENDING row, and possibly an unlisted object. Neither is ever shown. In AWS, an S3 lifecycle rule (slice 7) and a sweep of old PENDING rows would clean them up.
+  - An upload that is announced but never completed leaves a PENDING row, and possibly an unlisted object; neither is ever shown. `AbandonedUploadCleanup` deletes both once they are an hour old (the upload URL lasts five minutes), every 15 minutes. It touches only PENDING uploads. That is why it is a job and not an S3 lifecycle rule: an age-based rule on `incidents/*` would delete real attachments too.
   - Attachments can't be deleted yet.
   - Angular's `withFetch()` backend doesn't report upload progress, so the page shows "Uploading…" rather than a progress bar. At 10 MB that's acceptable.
 
@@ -323,6 +323,92 @@ cd frontend && npm ci && npm start
 
 If you run this alongside the full Compose stack, stop the Compose containers that use the same ports first. The `local` profiles assume the default `beacon` credentials.
 
+## Deploying to AWS
+
+The same services, on free-tier AWS. Everything is created by Terraform (`infra/terraform/`) and removed by one script.
+
+```mermaid
+flowchart LR
+    browser([Browser]) -->|HTTPS| cf["CloudFront<br/>(default *.cloudfront.net certificate)"]
+    cf -->|"/*  · origin access control"| web[("S3 · Angular build<br/>private")]
+    cf -->|"/api/*  · uncached, all headers<br/>port 8080, CloudFront's IPs only"| gw
+    subgraph vpc["VPC · no NAT gateway"]
+        subgraph ec2["EC2 t3.micro · Docker Compose · 2 GiB swap"]
+            gw["gateway"] --> auth["auth-service"]
+            gw --> inc["incident-service"]
+            gw --> notif["notification-service"]
+            inc --> notif
+        end
+        rds[("RDS Postgres 17<br/>db.t4g.micro · private subnets")]
+    end
+    auth & inc & notif --> rds
+    monitor([Monitoring tool]) --> apigw["API Gateway"] --> lambda["Lambda"] --> sqs[["SQS + DLQ"]] --> inc
+    browser -->|presigned PUT / GET| s3a[("S3 · attachments<br/>private")]
+    inc -.-> s3a
+    notif --> slack([Slack])
+    ssm[["SSM Parameter Store<br/>config + secrets"]] -.->|"read at deploy"| ec2
+    gha([GitHub Actions]) -->|"OIDC role:<br/>ECR push · S3 sync · SSM Run Command"| ec2
+```
+
+### Set it up
+
+You need an AWS account, administrator credentials for it in your shell, and `terraform`, `gh` (with admin rights on the repository), `jq` and JDK 21.
+
+```bash
+BUDGET_ALERT_EMAIL=you@example.com scripts/aws-up.sh   # shows the plan and asks first
+gh workflow run ci.yml --ref main                       # the first release; afterwards every push to main deploys
+scripts/aws-destroy.sh                                  # deletes everything, data and state included
+```
+
+`aws-up.sh` does four things:
+1. It builds the Lambda jar.
+2. It creates the Terraform state bucket (`infra/terraform/bootstrap`).
+3. It applies the main configuration.
+4. It creates the repository's `production` environment, deployable from `main` only, and stores the deploy job's settings as GitHub Actions *variables*. None of them is a secret.
+
+Optional settings: `AWS_REGION` (default `us-east-1`), `TF_VAR_slack_webhook_url` and `TF_VAR_demo_user_password`. Without a webhook, Slack is off and the smoke test expects `EXPECT_SLACK=off`. Without a demo password, Terraform generates one, and the script prints how to read it from SSM.
+
+### What a deploy does
+
+The `deploy` job runs on `main` after the four CI jobs pass:
+1. It assumes `beacon-github-deploy` through GitHub's OIDC provider. No AWS keys are stored in GitHub.
+2. It builds the four images and pushes them to ECR, tagged with the commit SHA. Tags are immutable, so a rerun skips images that are already there.
+3. It runs `deploy/start.sh <sha>` on the instance through SSM Run Command (`scripts/deploy-to-instance.sh`). No SSH and no open port 22.
+   - The script reads `/beacon/app/*` from Parameter Store into a root-only `.env`, pulls the images and starts them one after another.
+   - It waits until every service is healthy, so a release that doesn't start fails the job.
+   - Flyway migrates on startup, so the backend goes out before the UI.
+4. It ships the Lambda jar that the backend job built and tested.
+5. It uploads the Angular build to S3. Hashed bundles go first and are cached for good; `index.html` goes last, with `no-cache`, and is invalidated in CloudFront.
+6. It runs `scripts/smoke-test.sh` against the CloudFront URL, the same 14 steps as in CI. The demo password and the ingest key come from SSM; the job masks both in its log.
+
+Rolling back means deploying an older SHA: `start.sh` takes any tag that is still in ECR, and ECR keeps the last three.
+
+### Decisions and tradeoffs
+
+- **One origin, as locally.** CloudFront serves the app from S3 and sends `/api/*` to the gateway. That keeps the `SameSite=Strict` refresh cookie working and needs no CORS. The API behavior is uncached and forwards every header and cookie (`Managed-AllViewer`). Client-side routes are rewritten to `/index.html` by a CloudFront Function, not by distribution-wide error pages, which would turn the API's own 403s and 404s into the app's HTML.
+- **Only CloudFront can reach the instance.** Its security group admits port 8080 from the `com.amazonaws.global.cloudfront.origin-facing` prefix list only, and the gateway trusts exactly one `X-Forwarded-For` hop. A client can't connect directly and spoof its address past the login rate limit. RDS admits only the instance's security group, from subnets with no route out.
+- **Tradeoff: CloudFront reaches the instance over plain HTTP.** Without a domain of our own, the instance has no certificate CloudFront would accept. Browsers always use HTTPS, but the CloudFront-to-EC2 hop is not encrypted. With a domain, the fix is an ACM certificate on the origin, or an ALB, which is not free.
+- **Least-privilege roles, split by who changes what.**
+  - The instance role can consume the one queue, read and write `incidents/*` in the attachment bucket, read `/beacon/app/*` and pull Beacon's images. `ListBucket` is limited to `incidents/`. Without it, S3 answers 403 instead of 404 for an upload that hasn't arrived, and "not uploaded yet" would look like "access denied".
+  - The deploy role can ship a release: push images, sync the web bucket, invalidate the distribution, update the Lambda's code, run commands on this one instance and read two parameters. It can't change infrastructure; `terraform apply` is run by a person with `aws-up.sh`. Infrastructure changes are rare here, and a CI role that can create IAM roles is effectively an admin role.
+  - `terraform test` enforces both scopes (see [Tests](#tests)).
+- **Secrets live in SSM Parameter Store as SecureString**, with the AWS-managed key, so there is nothing extra to pay for. Terraform generates them: the database password, the JWT signing key (stable, so deploys don't log anyone out), the service token and the ingest key. That puts them in the Terraform state too, which is why the state is in a private, encrypted, versioned bucket with S3-native locking, and not on a laptop.
+- **Four JVMs on 1 GiB.** Measured locally with the production flags after a full smoke test, the services sit at about 245–290 MiB resident each, about 1.1 GiB together. The rest goes to swap.
+  - What swaps out is mostly pages touched at startup and rarely since. Expect slow first requests after a quiet period, and startups of a few minutes.
+  - The flags: SerialGC, 128 MB heap, capped metaspace, code cache and direct memory, and C1 only (`TieredStopAtLevel=1`).
+  - The services boot one at a time, and each Hikari pool is 5 connections.
+  - With `instance_type = "t3.small"` (2 GiB), swap stops mattering, if your free plan covers it.
+- **Staying free.**
+  - **Not used:** a NAT gateway, a load balancer, Secrets Manager, interface endpoints or KMS keys.
+  - **Instance:** CPU credits are set to `standard`, so a busy instance slows down instead of billing. (T3 instances launch `unlimited` by default.)
+  - **Network:** the S3 gateway endpoint (free) keeps image layers and attachments off the internet.
+  - **Logs:** they are rotated on the instance. The Lambda's are kept for 14 days.
+  - **Alert API:** API Gateway throttles to 20 requests/s, which caps what a leaked ingest key can cost.
+  - **Registry:** ECR's free 500 MB covers about one release of the four images. Three releases cost a few cents a month.
+  - **Budget:** an AWS Budgets alarm emails when actual spend passes half of `monthly_budget_usd` (default $5), or the forecast passes all of it.
+- **Removable in one step.** No deletion protection and no final snapshot on RDS, and `force_destroy` on the buckets and ECR. It is a demo environment; production would keep all of these.
+- **Checked offline.** Beyond `terraform test`, the configuration was scanned with checkov 3.2: 227 checks pass and 64 fail. The failures ask for things that cost money: KMS customer keys, WAF, Multi-AZ, cross-region replication, access logs, a custom certificate, detailed monitoring and X-Ray. Or they don't fit this design: the instance's public IP (there is no NAT gateway), Lambda in a VPC, encrypted non-secret parameters, and versioning on demo buckets.
+
 ## Tests
 
 ```bash
@@ -375,13 +461,19 @@ Postmortems run against a real Postgres and LocalStack S3 with signature checks 
 - S3 refusing a different type, a larger body and a different key on the signed URL
 - completing before uploading (`409`), and an object that doesn't match being deleted with its row
 - HTML, SVG and 10 MB + 1 byte refused with no URL issued; attachments only reachable under their own incident
+- the cleanup job deleting an abandoned upload's row and object, but neither a finished attachment of the same age nor an upload still in progress
 
 `PostmortemSecurityTest` adds the role checks with real tokens (viewers read but can't write or upload), and a simulated AWS SDK failure mapped to `503`.
 
-CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
+The Terraform has its own tests (`infra/terraform/tests/`), run by `terraform test` against a mocked AWS provider, so they need no account. They pin the decisions this README makes: only CloudFront's prefix list reaches the instance; RDS is private; IMDSv2 is required with a hop limit of 2; CPU credits are standard; disks are encrypted; both buckets block public access; CORS allows only the app's origin; `/api/*` is HTTPS-only and uncached, with no custom error pages. They also check that neither IAM role uses wildcard actions, that `Resource: "*"` appears only for actions that can't be scoped, and that only this repository's `production` environment can assume the deploy role. Breaking one of those settings fails the tests (checked by doing it).
+
+CI (`.github/workflows/ci.yml`) runs four parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
+- `terraform fmt -check`, `validate` (both configurations) and `terraform test`
 - `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. It sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Finally it writes the resolved incident's postmortem (a viewer gets 403) and attaches a file: a PUT with the wrong type is refused by S3, the right one is accepted, confirmed, and downloads byte for byte. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
+
+On `main`, a fifth job deploys to AWS once those four pass, then runs the same smoke test against the live URL (see [Deploying to AWS](#deploying-to-aws)). It is skipped until the AWS infrastructure exists, so pull requests and forks never need AWS.
 
 ## API
 
@@ -449,12 +541,17 @@ frontend/               Angular 22 app (standalone components, signals, zoneless
   nginx/                nginx config used by the frontend container
 infra/localstack/       LocalStack image + init scripts: API Gateway, the Lambda, SQS queue and DLQ, attachment bucket
 infra/fake-slack/       WireMock mapping that answers like a Slack incoming webhook
-scripts/smoke-test.sh   End-to-end checks against a running stack
+infra/terraform/        The AWS deployment (one file per concern), its tests, and bootstrap/ for the state bucket
+deploy/                 What runs on the EC2 instance: the production compose file and start.sh
+scripts/smoke-test.sh   End-to-end checks against a running stack, local or deployed
+scripts/aws-up.sh       Create/update the AWS deployment and connect GitHub Actions to it
+scripts/aws-destroy.sh  Delete all of it
+scripts/deploy-to-instance.sh  Ship a release to the instance through SSM Run Command
 docker-compose.yml      The whole local stack
-.github/workflows/      CI
+.github/workflows/      CI and the deploy job
 ```
 
-Later slices add `infra/terraform/`, `e2e/` (Playwright) and `load/` (k6).
+Slice 8 adds `e2e/` (Playwright) and `load/` (k6).
 
 ## Configuration
 
@@ -483,9 +580,9 @@ Services read their configuration from environment variables. The `local` Spring
 | `S3_PUBLIC_ENDPOINT` | incident-service | `http://localhost:4566`: the S3 endpoint presigned URLs are signed for, as the browser reaches it. Unset in AWS |
 | `LOCALSTACK_PORT` | LocalStack | `4566`, bound to `127.0.0.1` |
 | `FAKE_SLACK_PORT` | fake-slack | `8089`, bound to `127.0.0.1` |
-| `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k` |
+| `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k`; fixed, smaller limits in AWS (`deploy/docker-compose.yml`) |
 
-No secrets are committed. Real credentials come from GitHub Actions secrets and, once deployed, AWS.
+No secrets are committed. In AWS, the secrets and per-environment values come from SSM Parameter Store (see [Deploying to AWS](#deploying-to-aws)), and GitHub holds no AWS keys at all.
 
 ## Design notes (so far)
 
@@ -531,7 +628,7 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 - **Ids are assigned by the entity, not the database.** The `Triggered` event can then carry the id before the first save. The version field is a `Long`, so Spring Data still recognises a new entity (`version == null`) and inserts it instead of merging.
 - **Virtual threads** (`spring.threads.virtual.enabled`) let blocking JDBC code scale without a reactive rewrite. The gateway is the exception: it is reactive (WebFlux/Netty), as Spring Cloud Gateway is built.
 - **Time comes from an injected `Clock`**, truncated to Postgres' microsecond precision. Tests are deterministic, and a create response matches a later read exactly.
-- **JVM sizing is decided up front.** The AWS deployment runs several services on one 1 GB t3.micro, so the images default to SerialGC and a percentage-based heap.
+- **JVM sizing is decided up front.** The AWS deployment runs four services on one 1 GiB t3.micro, so the images default to SerialGC, and the production compose file caps heap, metaspace, code cache and direct memory explicitly.
 
 ### AWS and LocalStack
 

@@ -1,5 +1,6 @@
 package dev.beacon.incident.domain;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,4 +13,6 @@ public interface AttachmentRepository extends JpaRepository<Attachment, UUID> {
 
     /** Scoped to the incident, so an attachment id from one incident is not found under another. */
     Optional<Attachment> findByIdAndIncidentId(UUID id, UUID incidentId);
+
+    List<Attachment> findByStatusAndCreatedAtBefore(AttachmentStatus status, Instant cutoff);
 }
