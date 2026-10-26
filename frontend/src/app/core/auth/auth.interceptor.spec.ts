@@ -55,6 +55,14 @@ describe('authInterceptor', () => {
     refresh.flush(aSession('ignored'));
   });
 
+  // S3 authenticates a presigned upload by its URL and refuses one that also carries a bearer token.
+  it('sends presigned S3 uploads without the token, even when the path contains /api/', () => {
+    const url = 'http://localhost:4566/beacon-attachments/api/incidents/x?X-Amz-Signature=sig';
+    http.put(url, 'file').subscribe();
+
+    expect(backend.expectOne(url).request.headers.has('Authorization')).toBe(false);
+  });
+
   it('refreshes once on 401 and retries the request with the new token', () => {
     let body: unknown;
     http.get('/api/incidents').subscribe((response) => (body = response));

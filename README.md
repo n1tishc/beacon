@@ -15,7 +15,7 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 3 | Incident lifecycle: state machine, timeline, optimistic locking, Testcontainers | ✅ Shipped |
 | 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | ✅ Shipped |
 | 5 | Notifications: notification-service, Slack + mock sink, Resilience4j circuit breaker | ✅ Shipped |
-| 6 | Postmortems: editor, S3 presigned uploads | Planned |
+| 6 | Postmortems: editor, S3 presigned uploads | ✅ Shipped |
 | 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | Planned |
 | 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | Planned |
 
@@ -28,12 +28,15 @@ flowchart LR
         apigw["API Gateway"] --> lambda["alert-ingest Lambda<br/>Java 21: validate,<br/>fingerprint"]
         lambda --> sqs[["SQS beacon-alerts"]]
         sqs -.->|"3 failed receives"| dlq[["SQS beacon-alerts-dlq"]]
+        s3[("S3 beacon-attachments<br/>private")]
     end
+    browser -->|"presigned PUT / GET<br/>(attachment bytes)"| s3
+    incident -.->|"signs URLs,<br/>checks uploads"| s3
     sqs -->|"@SqsListener"| incident
     browser([Browser]) -->|":4200"| web["web<br/>nginx + Angular build"]
     web -->|"/api/*"| gateway["gateway :8080<br/>Spring Cloud Gateway<br/>JWT check · rate limits"]
     gateway -->|"/api/auth/**<br/>/api/users/**"| auth["auth-service :8082<br/>users · tokens"]
-    gateway -->|"/api/incidents/**"| incident["incident-service :8081<br/>incidents · timeline"]
+    gateway -->|"/api/incidents/**"| incident["incident-service :8081<br/>incidents · timeline<br/>postmortems"]
     gateway -->|"/api/notifications/**"| notification["notification-service :8083<br/>delivery status"]
     incident -->|"after commit, async<br/>POST /internal/notifications<br/>service token · circuit breaker"| notification
     notification -->|"webhook · circuit breaker"| slack(["Slack<br/>(fake-slack locally)"])
@@ -49,6 +52,7 @@ flowchart LR
 - **The gateway is the only way in.** It rejects requests without a valid token and rate-limits clients. The services behind it are not published to the host.
 - **Each service owns one schema** in a shared Postgres. None reads another's tables.
 - **Notifications are a side effect, never a dependency.** incident-service tells notification-service about a change only after it has committed, on a background thread. Neither Slack nor notification-service being down can fail or slow down an incident.
+- **Attachment bytes never go through Beacon.** The browser uploads and downloads postmortem files straight to and from S3 with short-lived presigned URLs; incident-service only signs them and checks what arrived.
 - **Alerts never go through the gateway.** Monitoring tools post to API Gateway with a shared ingest key; the Lambda only validates and queues, and incident-service consumes the queue at its own pace. A burst of alerts, or incident-service being down, just means a longer queue.
 
 ### How authentication works
@@ -168,6 +172,46 @@ sequenceDiagram
   ```
 - **Delivery counts are metrics.** `beacon.notifications.deliveries` (tags `channel`, `status`) in notification-service, `beacon.notifications.dropped` in incident-service.
 
+### How postmortem attachments are uploaded
+
+A resolved incident gets a postmortem: summary, impact, root cause and action items, edited by responders and readable by everyone. Files attached to it (screenshots, graphs, logs, PDFs) are stored in S3.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant I as incident-service
+    participant DB as Postgres (incident)
+    participant S as S3 (LocalStack locally)
+    B->>I: POST …/attachments {fileName, contentType, sizeBytes}
+    I->>I: allowed type? ≤ 10 MB? incident resolved?
+    I->>DB: attachment row, PENDING, key incidents/{id}/attachments/{uuid}
+    I-->>B: 201 {uploadUrl, uploadHeaders, expiresAt}: PUT signed for that key, type and size, 5 min
+    B->>S: PUT uploadUrl (the file, no bearer token)
+    S-->>B: 200, or 403 if anything differs from what was signed
+    B->>I: POST …/attachments/{aid}/complete
+    I->>S: HEAD the key: size and type as announced?
+    I->>DB: UPLOADED (or delete the object and the row)
+    B->>I: GET …/attachments/{aid}/download
+    I-->>B: {url}: GET signed for 1 min, served as Content-Disposition: attachment
+```
+
+- **Why presigned URLs.** File bytes go straight between the browser and S3, so a 10 MB upload never ties up a service thread or its memory. On the 1 GB instance this deploys to, that matters.
+- **The server decides what may be uploaded, and S3 enforces it.**
+  - The key is chosen by the server (`incidents/{incidentId}/attachments/{uuid}`), never from the file name, so an upload can only land under its own incident. The name is stored only as data.
+  - The URL is signed with `Content-Type` and `Content-Length`. The integration tests assert this: S3 refuses a different type, a larger body, or a different key with 403.
+  - Only images, PDFs, and text, CSV or JSON files, up to 10 MB. HTML and SVG are refused, because a browser would run script in them.
+  - **Trust, then verify.** `complete` checks the object's size and type with a HEAD before listing it. Anything that doesn't match is deleted along with its row. The tests cover this by putting an object there without the URL.
+- **Downloads can't be turned into a page.** A download URL lives for one minute and makes S3 answer with `Content-Disposition: attachment` and the stored type, so even a mislabeled file is saved, not rendered. The file name in that header is escaped (an ASCII fallback plus the RFC 6266 `filename*` form), and a test feeds it quotes and line breaks.
+- **Two endpoints, one signature.** Inside Compose, incident-service reaches LocalStack as `localstack:4566`, but the browser reaches it as `localhost:4566`. The host is part of a presigned URL's signature, so the URL can't be rewritten afterwards. incident-service therefore defines its own `S3Presigner` for the public endpoint (`S3_PUBLIC_ENDPOINT`) and keeps Spring Cloud AWS's `S3Client` on the internal one. In AWS neither is set and both use S3's own endpoint.
+- **LocalStack checks signatures here.** It skips presigned-URL validation unless `S3_SKIP_SIGNATURE_VALIDATION=0`, which Compose and the Testcontainers tests both set. Without it, the "S3 refuses a wrong type" tests would pass for the wrong reason.
+- **The bucket is private, with one CORS rule:** `PUT` from the web app's origin with a `content-type` header. Downloads are plain navigations and need no CORS. The auth interceptor only adds the bearer token to `/api/` paths, and S3 would reject a request that carried one; a spec covers that.
+- **The postmortem has its own `@Version`.** A save sends the version on screen, and a stale one gets `409 Postmortem changed`. Unlike an incident command, the page keeps the user's draft in the form, since it may be a lot of writing. It loads the other version and says who saved it, and the user either saves again to replace it or discards their draft. Someone saving a first draft when one already exists gets the same 409, rather than overwriting it; if two first drafts race to the database, the primary key stops the second.
+- **S3 being down costs attachments, not postmortems.** Any AWS SDK error becomes `503 File storage unavailable`; the text of the postmortem still saves.
+- **Tradeoffs:**
+  - An upload that is announced but never completed leaves a PENDING row, and possibly an unlisted object. Neither is ever shown. In AWS, an S3 lifecycle rule (slice 7) and a sweep of old PENDING rows would clean them up.
+  - Attachments can't be deleted yet.
+  - Angular's `withFetch()` backend doesn't report upload progress, so the page shows "Uploading…" rather than a progress bar. At 10 MB that's acceptable.
+
 ## Quick start
 
 The only prerequisite is Docker (Docker Desktop, or Docker Engine with Compose v2).
@@ -181,7 +225,7 @@ Open http://localhost:4200 and sign in with one of the demo accounts. The passwo
 | Username | Role | Can |
 |----------|------|-----|
 | `viewer` | VIEWER | view incidents |
-| `responder` | RESPONDER | view, trigger, acknowledge and resolve incidents, add notes |
+| `responder` | RESPONDER | view, trigger, acknowledge and resolve incidents, add notes, write postmortems and attach files |
 | `admin` | ADMIN | everything, plus manage users |
 
 | What | URL |
@@ -236,6 +280,8 @@ docker compose start fake-slack    # about 30 s later trial calls go through and
 
 To post to a real workspace, put its incoming-webhook URL in `.env` as `SLACK_WEBHOOK_URL`.
 
+Resolve an incident and its page links to the postmortem. Attachments go to LocalStack's S3, in the `beacon-attachments` bucket; list them with `docker compose exec localstack awslocal s3 ls s3://beacon-attachments --recursive`. Open the app at `http://localhost:4200`, not `127.0.0.1`, because the bucket's CORS rule names that origin.
+
 `scripts/smoke-test.sh` runs the same kind of checks against any running stack (it needs `jq`). CI runs it too.
 
 Stop with `docker compose down`. Add `-v` to also delete the database volume.
@@ -249,7 +295,7 @@ Run Postgres in Docker and the apps on your machine, with hot reload.
 From the repo root:
 
 ```bash
-# Database and the AWS emulator (the alert queue)
+# Database and the AWS emulator (the alert queue, the attachment bucket)
 docker compose up -d postgres localstack
 
 # Once: install the parent POM and security-common so single-module runs can resolve them
@@ -321,10 +367,20 @@ Notifications are tested from both ends, each against a real Postgres and WireMo
 - **notification-service against a fake Slack:** delivered; a 500 retried and then sent; Slack down (FAILED after 3 attempts, the mock sink still SENT, the request still 200); a slow Slack timing out; a 404 not retried and not counted against the circuit; the circuit opening, Slack no longer called (request count stops), Actuator showing OPEN while health stays UP; recovery through HALF_OPEN to CLOSED; a repeated event answered from the record without a second post; and the service token, which opens only `/internal/**`.
 - **incident-service against a fake notification-service:** every lifecycle change sent after commit, with the service token, in the exact JSON notification-service reads (notes not sent); incidents created while it returns 500s; the API answering while it hangs; its circuit opening; a 401 not retried; and an alert notifying while its repeats don't.
 
+Postmortems run against a real Postgres and LocalStack S3 with signature checks on. Files go to the presigned URLs over plain HTTP, the way a browser sends them:
+- writing, then revising, a postmortem: author kept, editor recorded, blank sections stored as empty
+- a stale version and a second "first draft" both answering `409 Postmortem changed` without changing anything
+- no postmortem and no uploads before the incident is resolved
+- upload, complete (twice, idempotent), list, then download: the same bytes, served as an attachment under an escaped name
+- S3 refusing a different type, a larger body and a different key on the signed URL
+- completing before uploading (`409`), and an object that doesn't match being deleted with its row
+- HTML, SVG and 10 MB + 1 byte refused with no URL issued; attachments only reachable under their own incident
+- viewers reading but not writing; and an S3 outage answering `503`
+
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
-- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. Finally it sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
+- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. It sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Finally it writes the resolved incident's postmortem (a viewer gets 403) and attaches a file: a PUT with the wrong type is refused by S3, the right one is accepted, confirmed, and downloads byte for byte. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
 
 ## API
 
@@ -345,7 +401,12 @@ All endpoints go through the gateway. Errors use [RFC 7807](https://www.rfc-edit
 | `POST` | `/api/incidents/{id}/resolve` | RESPONDER | `{version, note?}`. Same `409`s as acknowledge. |
 | `GET` | `/api/incidents/{id}/timeline` | VIEWER | Everything that happened to the incident, oldest first: type, actor, time, note. |
 | `POST` | `/api/incidents/{id}/notes` | RESPONDER | `{text}`. Appends a note to the timeline. `201`. Notes don't change the incident, so they need no version. |
-
+| `GET` | `/api/incidents/{id}/postmortem` | VIEWER | The postmortem, or `404 Postmortem not found` until someone writes one. |
+| `PUT` | `/api/incidents/{id}/postmortem` | RESPONDER | `{version, summary, impact?, rootCause?, actionItems?}`. `version` is `null` for the first draft. `409 Postmortem changed` if stale, `409 Incident not resolved` before it is resolved. |
+| `GET` | `/api/incidents/{id}/postmortem/attachments` | VIEWER | Uploaded attachments, oldest first. |
+| `POST` | `/api/incidents/{id}/postmortem/attachments` | RESPONDER | `{fileName, contentType, sizeBytes}` → `201 {attachment, uploadUrl, uploadHeaders, expiresAt}`. `400 Attachment not allowed` for other types or over 10 MB. |
+| `POST` | `/api/incidents/{id}/postmortem/attachments/{aid}/complete` | RESPONDER | After the PUT to `uploadUrl`. `200` once checked, `409 Upload not finished` if nothing arrived, `400` (and discarded) if it doesn't match. |
+| `GET` | `/api/incidents/{id}/postmortem/attachments/{aid}/download` | VIEWER | `{url, expiresAt}`: a one-minute download link. |
 | `GET` | `/api/notifications?incidentId` | VIEWER | The incident's notifications, oldest first: event, channel, status (`PENDING`, `SENT`, `FAILED`, `SKIPPED`), attempts, failure reason, message. |
 | `GET` | `/api/notifications/channels` | VIEWER | Each channel, whether it is configured, and Slack's circuit state (`CLOSED`, `OPEN`, `HALF_OPEN`). |
 
@@ -374,7 +435,7 @@ backend/                Maven multi-module build
   alert-contract/       The SQS message between the Lambda and incident-service, and its JSON codec
   alert-ingest-lambda/  AWS Lambda (plain Java 21, no Spring): validates alerts and queues them
   auth-service/         Users, login, access/refresh tokens, JWKS
-  incident-service/     Incidents: api/ (controllers, DTO records), service/, ingest/ (SQS listener), domain/
+  incident-service/     Incidents and postmortems: api/, service/, domain/, ingest/ (SQS listener), notify/, storage/ (S3)
   notification-service/ Slack + mock sink channels behind Resilience4j, delivery records, internal API
   gateway/              Spring Cloud Gateway: routes, JWT check, in-memory rate limiter
   Dockerfile            One multi-stage Dockerfile for every service (--build-arg SERVICE=...)
@@ -383,8 +444,9 @@ frontend/               Angular 22 app (standalone components, signals, zoneless
   src/app/login/        Login page
   src/app/incidents/    Feature folder: API client, stores, dashboard, table, form, detail page, timeline
   src/app/notifications/ Notification panel for the detail page, channel status for the dashboard
+  src/app/postmortems/  Postmortem editor page, its store, uploads straight to S3
   nginx/                nginx config used by the frontend container
-infra/localstack/       LocalStack image + init script: API Gateway, the Lambda, SQS queue and DLQ
+infra/localstack/       LocalStack image + init scripts: API Gateway, the Lambda, SQS queue and DLQ, attachment bucket
 infra/fake-slack/       WireMock mapping that answers like a Slack incoming webhook
 scripts/smoke-test.sh   End-to-end checks against a running stack
 docker-compose.yml      The whole local stack
@@ -415,6 +477,9 @@ Services read their configuration from environment variables. The `local` Spring
 | `INGEST_API_KEY` | alert Lambda | `local-ingest-key` |
 | `ALERT_QUEUE` | incident-service | `beacon-alerts` |
 | `SPRING_CLOUD_AWS_SQS_ENDPOINT`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | incident-service | LocalStack (`http://localstack:4566`, `us-east-1`, `test`/`test`); in AWS no endpoint and the instance role's credentials |
+| `ATTACHMENTS_BUCKET` | incident-service, LocalStack | `beacon-attachments` |
+| `SPRING_CLOUD_AWS_S3_ENDPOINT`, `S3_PATH_STYLE_ACCESS` | incident-service | `http://localstack:4566`, `true`; in AWS unset and `false` |
+| `S3_PUBLIC_ENDPOINT` | incident-service | `http://localhost:4566`: the S3 endpoint presigned URLs are signed for, as the browser reaches it. Unset in AWS |
 | `LOCALSTACK_PORT` | LocalStack | `4566`, bound to `127.0.0.1` |
 | `FAKE_SLACK_PORT` | fake-slack | `8089`, bound to `127.0.0.1` |
 | `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k` |
@@ -482,6 +547,7 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 - **Stores are plain signals services** (`AuthStore`, `IncidentStore`): private writable state, public `computed` selectors, and methods as the only way to change state. That is enough structure for this app without the NgRx boilerplate. `IncidentStore` clears itself when the user signs out.
 - **Route guards use `canMatch`, not `canActivate`**, so a signed-out visitor never downloads the lazy-loaded feature chunk. After login the user returns to `returnUrl`, which only accepts in-app paths.
 - **Role checks in the UI are a courtesy.** Viewers don't see the trigger form or the acknowledge/resolve controls, but the API is what enforces it. The buttons shown follow the same transition table as the backend (`canAcknowledge`, `canResolve`).
+- **Uploads go straight to S3, without the token.** The postmortem store announces a file, PUTs it to the presigned URL with exactly the signed headers, then asks the server to confirm it. The file picker and the store check the type and size first, mirroring `AttachmentPolicy`, so a wrong file fails before anything is sent. A failed PUT gets its own message, since S3 answers in XML, not problem JSON.
 - **The detail page has its own store**, provided by the component rather than in root, so it lives and dies with the page. Commands return cold Observables, so nothing happens until the component subscribes. After every command the store reloads the incident and its timeline, so the page shows what the server has, not a guess.
 - **nginx re-resolves the gateway's address.** It uses Docker's DNS resolver and a variable `proxy_pass`. With a plain hostname, nginx looks the address up once at startup and answers 502 after the gateway container is recreated.
 - **OnPush everywhere.** OnPush is Angular 22's default, but components still declare it explicitly so readers who know older Angular can see it.

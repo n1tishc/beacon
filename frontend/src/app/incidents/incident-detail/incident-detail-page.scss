@@ -118,6 +118,19 @@ label {
   font-size: 0.875rem;
 }
 
+.postmortem-link {
+  display: inline-block;
+  margin-top: 1rem;
+  color: var(--primary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.postmortem-link:hover {
+  text-decoration: underline;
+}
+
 .notifications {
   margin-top: 1.25rem;
   padding-top: 1.25rem;

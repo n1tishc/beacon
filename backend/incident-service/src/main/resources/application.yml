@@ -29,6 +29,9 @@ spring:
       sqs:
         # A missing queue is a deployment error. Never let the app create one without its dead-letter queue.
         queue-not-found-strategy: fail
+      s3:
+        # LocalStack serves buckets as http://host/bucket; AWS uses bucket.s3.amazonaws.com.
+        path-style-access-enabled: ${S3_PATH_STYLE_ACCESS:false}
   security:
     oauth2:
       resourceserver:
@@ -43,6 +46,14 @@ beacon:
   notifications:
     url: ${NOTIFICATION_SERVICE_URL:http://localhost:8083}
     service-token: ${NOTIFICATION_SERVICE_TOKEN:}
+  # Postmortem attachments. Browsers upload and download directly with presigned URLs; these are
+  # short-lived because anyone holding one can use it until it expires.
+  attachments:
+    bucket: ${ATTACHMENTS_BUCKET:beacon-attachments}
+    public-endpoint: ${S3_PUBLIC_ENDPOINT:}
+    path-style-access: ${S3_PATH_STYLE_ACCESS:false}
+    upload-url-ttl: 5m
+    download-url-ttl: 1m
 
 # notification-service takes up to 7.5 s when Slack is failing (its own retries; see its
 # application.yml), so one attempt here may take 10 s. All of it runs after the incident is saved,

@@ -47,6 +47,4 @@ awslocal apigateway put-integration --rest-api-id "$api_id" --resource-id "$aler
   >/dev/null
 awslocal apigateway create-deployment --rest-api-id "$api_id" --stage-name local >/dev/null
 
-# The compose healthcheck waits for this file, so dependants start only once everything above exists.
-touch /tmp/beacon-ready
 echo "Beacon alert ingestion ready: http://localhost:4566/_aws/execute-api/$api_id/local/alerts -> $queue_url"

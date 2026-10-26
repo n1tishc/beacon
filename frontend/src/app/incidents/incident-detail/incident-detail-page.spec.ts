@@ -88,6 +88,16 @@ describe('IncidentDetailPage', () => {
     expect(resolved.element.textContent).toContain('This incident is resolved.');
   });
 
+  it('links to the postmortem only once the incident is resolved', async () => {
+    const open = await render(anIncident({ status: 'ACKNOWLEDGED' }));
+    expect(testId(open.element, 'postmortem-link')).toBeNull();
+
+    const resolved = await render(anIncident({ status: 'RESOLVED' }));
+    const link = testId(resolved.element, 'postmortem-link');
+    expect(link?.getAttribute('href')).toMatch(/\/postmortem$/);
+    expect(link?.textContent).toContain('Write or edit the postmortem');
+  });
+
   it('gives viewers no way to change the incident', async () => {
     role = 'VIEWER';
     const { element } = await render(anIncident({ status: 'TRIGGERED' }));

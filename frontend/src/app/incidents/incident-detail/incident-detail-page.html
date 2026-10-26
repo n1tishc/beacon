@@ -133,6 +133,12 @@
         <p class="muted closed">This incident is resolved.</p>
       }
 
+      @if (incident.status === 'RESOLVED') {
+        <a class="postmortem-link" data-testid="postmortem-link" [routerLink]="['postmortem']">{{
+          canRespond() ? 'Write or edit the postmortem →' : 'Read the postmortem →'
+        }}</a>
+      }
+
       <section class="notifications" aria-labelledby="notifications-heading">
         <h2 id="notifications-heading">Notifications</h2>
         <app-incident-notifications [incidentId]="incident.id" />
