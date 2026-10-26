@@ -34,7 +34,8 @@ import dev.beacon.incident.domain.TimelineEntryType;
  * the caller's version first, and Hibernate's {@code @Version} check catches anyone who slipped past
  * that comparison before the other transaction committed.
  */
-@SpringBootTest
+// These tests are about the HTTP API and the database; the SQS listener has its own test.
+@SpringBootTest(properties = "spring.cloud.aws.sqs.enabled=false")
 @Import(PostgresTestcontainer.class)
 class OptimisticLockingIntegrationTest {
 

@@ -47,6 +47,12 @@ tbody tr:hover {
   text-decoration: underline;
 }
 
+.origin {
+  margin-top: 0.125rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
 .description {
   display: -webkit-box;
   -webkit-box-orient: vertical;

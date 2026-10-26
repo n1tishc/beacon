@@ -17,6 +17,44 @@ h1 {
   font-size: 0.875rem;
 }
 
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-left: 0.5rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--status-resolved);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.live.failing {
+  color: var(--danger);
+}
+
+.live.failing .live-dot {
+  background: var(--danger);
+  animation: none;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 22rem;

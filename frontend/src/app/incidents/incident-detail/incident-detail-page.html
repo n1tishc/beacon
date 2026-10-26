@@ -80,6 +80,22 @@
             <span class="muted">—</span>
           }
         </dd>
+        @if (incident.source) {
+          <dt>Source</dt>
+          <dd data-testid="source">{{ incident.source }}</dd>
+          <dt>Alerts</dt>
+          <dd data-testid="alert-count">{{ incident.alertCount }}</dd>
+          <dt>Last alert</dt>
+          <dd>
+            <time [attr.datetime]="incident.lastAlertAt">{{
+              incident.lastAlertAt | date: 'MMM d, HH:mm:ss'
+            }}</time>
+          </dd>
+          <dt>Fingerprint</dt>
+          <dd class="fingerprint" [attr.title]="incident.fingerprint">
+            {{ incident.fingerprint }}
+          </dd>
+        }
       </dl>
 
       @if (showAcknowledge() || showResolve()) {

@@ -20,6 +20,8 @@
 
     <modules>
         <module>security-common</module>
+        <module>alert-contract</module>
+        <module>alert-ingest-lambda</module>
         <module>auth-service</module>
         <module>incident-service</module>
         <module>gateway</module>
@@ -30,6 +32,12 @@
         <spring-cloud.version>2025.0.3</spring-cloud.version>
         <jacoco.version>0.8.15</jacoco.version>
         <wiremock.version>3.13.2</wiremock.version>
+        <!-- 3.4.x is the Spring Cloud AWS line for Spring Boot 3.5; its BOM also pins the AWS SDK v2. -->
+        <spring-cloud-aws.version>3.4.2</spring-cloud-aws.version>
+        <aws-lambda-java-core.version>1.4.1</aws-lambda-java-core.version>
+        <aws-lambda-java-events.version>3.16.1</aws-lambda-java-events.version>
+        <!-- The last LocalStack release that runs without an auth token; see README. Used by Testcontainers. -->
+        <localstack.image>localstack/localstack:4.14</localstack.image>
     </properties>
 
     <dependencyManagement>
@@ -46,6 +54,21 @@
                 <type>test-jar</type>
             </dependency>
             <dependency>
+                <groupId>dev.beacon</groupId>
+                <artifactId>alert-contract</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.amazonaws</groupId>
+                <artifactId>aws-lambda-java-core</artifactId>
+                <version>${aws-lambda-java-core.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.amazonaws</groupId>
+                <artifactId>aws-lambda-java-events</artifactId>
+                <version>${aws-lambda-java-events.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>org.wiremock</groupId>
                 <artifactId>wiremock-standalone</artifactId>
                 <version>${wiremock.version}</version>
@@ -54,6 +77,13 @@
                 <groupId>org.springframework.cloud</groupId>
                 <artifactId>spring-cloud-dependencies</artifactId>
                 <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.awspring.cloud</groupId>
+                <artifactId>spring-cloud-aws-dependencies</artifactId>
+                <version>${spring-cloud-aws.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

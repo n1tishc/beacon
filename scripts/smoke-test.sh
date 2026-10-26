@@ -4,12 +4,16 @@
 #   scripts/smoke-test.sh [base-url]        default: http://localhost:4200
 #
 # Uses the demo accounts, so DEMO_USER_PASSWORD must match the stack's (default: beacon-demo).
+# Alerts go to INGEST_URL (default: LocalStack's API Gateway) with INGEST_API_KEY (default: local-ingest-key).
 # Requires curl and jq. Used by CI against docker compose and, later, against the AWS deployment.
 set -euo pipefail
 
 BASE_URL="${1:-http://localhost:4200}"
 PASSWORD="${DEMO_USER_PASSWORD:-beacon-demo}"
+INGEST_URL="${INGEST_URL:-http://localhost:4566/_aws/execute-api/beacon/local/alerts}"
+INGEST_API_KEY="${INGEST_API_KEY:-local-ingest-key}"
 TITLE="Smoke test $(date -u +%Y%m%dT%H%M%SZ)"
+ALERT_TITLE="Smoke alert $(date -u +%Y%m%dT%H%M%SZ)"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -77,5 +81,42 @@ echo "7. The timeline records every step, oldest first, with who did it"
 curl -fsS "$BASE_URL/api/incidents/$INCIDENT_ID/timeline" -H "Authorization: Bearer $VIEWER_TOKEN" \
   | jq -e 'map(.type) == ["TRIGGERED", "ACKNOWLEDGED", "RESOLVED"] and all(.actor == "responder")' >/dev/null \
   || fail "timeline does not match the lifecycle"
+
+# send_alert <api-key>: prints the status of POSTing one alert to the ingest endpoint.
+send_alert() {
+  status_of -X POST "$INGEST_URL" \
+    -H "X-Beacon-Ingest-Key: $1" \
+    -H 'Content-Type: application/json' \
+    -d "{\"source\": \"smoke-test\", \"title\": \"$ALERT_TITLE\", \"severity\": \"HIGH\"}"
+}
+
+# wait_for_alert_count <n>: polls until exactly one incident has the alert title and n alerts; prints its id.
+# The first alert pays the Lambda cold start, hence the generous deadline.
+wait_for_alert_count() {
+  local deadline=$((SECONDS + 90)) found
+  while ((SECONDS < deadline)); do
+    found=$(curl -fsS "$BASE_URL/api/incidents?size=100" -H "Authorization: Bearer $VIEWER_TOKEN" \
+      | jq -r --arg title "$ALERT_TITLE" --argjson n "$1" \
+        '[.content[] | select(.title == $title)] | if length == 1 and .[0].alertCount == $n then .[0].id else empty end')
+    if [[ -n "$found" ]]; then
+      echo "$found"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+echo "8. The alert endpoint refuses requests without the ingest key"
+[[ $(send_alert wrong-key) == 401 ]] || fail "alert with a wrong key was not rejected"
+
+echo "9. An alert becomes an incident (API Gateway -> Lambda -> SQS -> incident-service)"
+[[ $(send_alert "$INGEST_API_KEY") == 202 ]] || fail "alert was not accepted"
+FIRST_ID=$(wait_for_alert_count 1) || fail "alert did not become an incident within 90 s"
+
+echo "10. A repeat of the same alert folds into that incident instead of opening another"
+[[ $(send_alert "$INGEST_API_KEY") == 202 ]] || fail "repeat alert was not accepted"
+SECOND_ID=$(wait_for_alert_count 2) || fail "repeat alert was not counted against the open incident"
+[[ "$FIRST_ID" == "$SECOND_ID" ]] || fail "repeat alert opened a different incident"
 
 echo "Smoke test passed against $BASE_URL"

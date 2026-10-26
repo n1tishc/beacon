@@ -30,7 +30,8 @@ import dev.beacon.security.Role;
  * The whole lifecycle over HTTP against a real Postgres: Flyway migrations, the JPA mappings, the
  * {@code @Version} column and the timeline ordering all run for real.
  */
-@SpringBootTest
+// These tests are about the HTTP API and the database; the SQS listener has its own test.
+@SpringBootTest(properties = "spring.cloud.aws.sqs.enabled=false")
 @AutoConfigureMockMvc
 @Import(PostgresTestcontainer.class)
 class IncidentLifecycleIntegrationTest {
