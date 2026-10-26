@@ -6,6 +6,10 @@
 FROM eclipse-temurin:21-jdk AS lambda
 WORKDIR /workspace
 COPY --from=backend . .
+# docker compose builds five images at once, all sharing this Maven cache. The wrapper unpacks Maven
+# into it on first use, and parallel unpacks collide, so install it under a lock first; the build
+# below then shares the cache freely.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked ./mvnw -q --version >/dev/null
 RUN --mount=type=cache,target=/root/.m2 \
     ./mvnw -B -q -pl alert-ingest-lambda -am -DskipTests package \
     && cp alert-ingest-lambda/target/alert-ingest-lambda.jar /alert-ingest-lambda.jar
