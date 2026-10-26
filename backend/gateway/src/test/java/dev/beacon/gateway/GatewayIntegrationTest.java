@@ -53,10 +53,16 @@ class GatewayIntegrationTest {
             .options(wireMockConfig().dynamicPort())
             .build();
 
+    @RegisterExtension
+    static WireMockExtension notificationService = WireMockExtension.newInstance()
+            .options(wireMockConfig().dynamicPort())
+            .build();
+
     @DynamicPropertySource
     static void pointRoutesAtWireMock(DynamicPropertyRegistry registry) {
         registry.add("AUTH_SERVICE_URL", authService::baseUrl);
         registry.add("INCIDENT_SERVICE_URL", incidentService::baseUrl);
+        registry.add("NOTIFICATION_SERVICE_URL", notificationService::baseUrl);
         registry.add("AUTH_JWKS_URI", () -> authService.baseUrl() + "/.well-known/jwks.json");
     }
 
@@ -68,6 +74,7 @@ class GatewayIntegrationTest {
         authService.stubFor(get("/.well-known/jwks.json").willReturn(okJson(tokens.jwksJson())));
         authService.stubFor(WireMock.any(urlPathMatching("/api/.*")).willReturn(okJson("{\"service\":\"auth\"}")));
         incidentService.stubFor(WireMock.any(urlPathMatching("/api/.*")).willReturn(okJson("{\"service\":\"incident\"}")));
+        notificationService.stubFor(WireMock.any(anyUrl()).willReturn(okJson("{\"service\":\"notification\"}")));
     }
 
     @Test
@@ -95,6 +102,22 @@ class GatewayIntegrationTest {
         client.get().uri("/api/users").headers(h -> h.setBearerAuth(tokens.forRole(Role.ADMIN))).exchange()
                 .expectStatus().isOk()
                 .expectBody().jsonPath("$.service").isEqualTo("auth");
+    }
+
+    @Test
+    void routesNotificationViewsToNotificationService() {
+        client.get().uri("/api/notifications/channels").headers(h -> h.setBearerAuth(tokens.forRole(Role.VIEWER))).exchange()
+                .expectStatus().isOk()
+                .expectBody().jsonPath("$.service").isEqualTo("notification");
+    }
+
+    /** Only incident-service may call it, from inside the network; the gateway must not expose it. */
+    @Test
+    void neverExposesNotificationServicesInternalApi() {
+        client.post().uri("/internal/notifications").headers(h -> h.setBearerAuth(tokens.forRole(Role.ADMIN))).exchange()
+                .expectStatus().isNotFound();
+
+        notificationService.verify(0, anyRequestedFor(urlPathMatching("/internal/.*")));
     }
 
     @Test

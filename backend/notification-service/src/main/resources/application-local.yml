@@ -1,0 +1,11 @@
+# Laptop defaults: matches the Postgres container in docker-compose.yml.
+# Activate with SPRING_PROFILES_ACTIVE=local (or -Dspring-boot.run.profiles=local).
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/beacon
+    username: beacon
+    password: beacon
+
+beacon:
+  notifications:
+    service-token: local-service-token

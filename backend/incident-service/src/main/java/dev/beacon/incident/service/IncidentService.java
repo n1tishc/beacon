@@ -22,7 +22,7 @@ import dev.beacon.incident.domain.TimelineEntryRepository;
 
 /**
  * Use cases for incidents. Each command runs in one transaction: the state change and its timeline
- * entry commit together or not at all.
+ * entry commit together or not at all, and notifications go out only after the commit.
  */
 @Service
 @Transactional(readOnly = true)
@@ -32,18 +32,21 @@ public class IncidentService {
 
     private final IncidentRepository incidents;
     private final TimelineEntryRepository timeline;
+    private final IncidentEventRecorder recorder;
     private final Clock clock;
 
-    public IncidentService(IncidentRepository incidents, TimelineEntryRepository timeline, Clock clock) {
+    public IncidentService(IncidentRepository incidents, TimelineEntryRepository timeline,
+                           IncidentEventRecorder recorder, Clock clock) {
         this.incidents = incidents;
         this.timeline = timeline;
+        this.recorder = recorder;
         this.clock = clock;
     }
 
     @Transactional
     public Incident create(String title, String description, Severity severity, String actor) {
         Incident incident = incidents.save(Incident.trigger(title, description, severity, now()));
-        record(incident.triggeredBy(actor));
+        recorder.record(incident, incident.triggeredBy(actor));
         return incident;
     }
 
@@ -65,7 +68,7 @@ public class IncidentService {
     public Incident acknowledge(UUID id, long expectedVersion, String actor) {
         Incident incident = get(id);
         incident.requireVersion(expectedVersion);
-        record(incident.acknowledge(actor, now()));
+        recorder.record(incident, incident.acknowledge(actor, now()));
         return incident;
     }
 
@@ -74,7 +77,7 @@ public class IncidentService {
     public Incident resolve(UUID id, long expectedVersion, String actor, String resolutionNote) {
         Incident incident = get(id);
         incident.requireVersion(expectedVersion);
-        record(incident.resolve(actor, resolutionNote, now()));
+        recorder.record(incident, incident.resolve(actor, resolutionNote, now()));
         return incident;
     }
 
@@ -82,17 +85,13 @@ public class IncidentService {
     @Transactional
     public TimelineEntry addNote(UUID id, String actor, String text) {
         Incident incident = get(id);
-        return record(new IncidentEvent.NoteAdded(incident.getId(), actor, now(), text));
+        return recorder.record(incident, new IncidentEvent.NoteAdded(incident.getId(), actor, now(), text));
     }
 
     /** Oldest first, the order a timeline is read in. */
     public List<TimelineEntry> timeline(UUID id) {
         Incident incident = get(id);
         return timeline.findByIncidentIdOrderByOccurredAtAscIdAsc(incident.getId());
-    }
-
-    private TimelineEntry record(IncidentEvent event) {
-        return timeline.save(TimelineEntry.of(event));
     }
 
     /**

@@ -35,7 +35,7 @@ import dev.beacon.incident.domain.TimelineEntryType;
  * that comparison before the other transaction committed.
  */
 // These tests are about the HTTP API and the database; the SQS listener has its own test.
-@SpringBootTest(properties = "spring.cloud.aws.sqs.enabled=false")
+@SpringBootTest(properties = {"spring.cloud.aws.sqs.enabled=false", "beacon.notifications.enabled=false"})
 @Import(PostgresTestcontainer.class)
 class OptimisticLockingIntegrationTest {
 

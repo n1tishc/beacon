@@ -4,8 +4,9 @@ import { TestBed } from '@angular/core/testing';
 import { Subject, Subscription, of, throwError } from 'rxjs';
 
 import { AuthStore } from '../core/auth/auth-store';
+import { LIVE_REFRESH_MS } from '../core/while-visible';
 import { IncidentApi } from './incident-api';
-import { IncidentStore, LIVE_REFRESH_MS } from './incident-store';
+import { IncidentStore } from './incident-store';
 import { Incident, Page } from './incident.model';
 import { aPageOf, anIncident } from './testing/incident-fixtures';
 

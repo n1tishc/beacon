@@ -5,6 +5,10 @@
 #
 # Uses the demo accounts, so DEMO_USER_PASSWORD must match the stack's (default: beacon-demo).
 # Alerts go to INGEST_URL (default: LocalStack's API Gateway) with INGEST_API_KEY (default: local-ingest-key).
+# EXPECT_SLACK says what Slack delivery should look like:
+#   sent (default)  every Slack notification was delivered (locally: to the fake-slack container)
+#   down            Slack is unreachable: deliveries fail, the circuit opens, incidents still work
+#   off             no Slack webhook is configured, so only the mock sink is notified
 # Requires curl and jq. Used by CI against docker compose and, later, against the AWS deployment.
 set -euo pipefail
 
@@ -12,6 +16,7 @@ BASE_URL="${1:-http://localhost:4200}"
 PASSWORD="${DEMO_USER_PASSWORD:-beacon-demo}"
 INGEST_URL="${INGEST_URL:-http://localhost:4566/_aws/execute-api/beacon/local/alerts}"
 INGEST_API_KEY="${INGEST_API_KEY:-local-ingest-key}"
+EXPECT_SLACK="${EXPECT_SLACK:-sent}"
 TITLE="Smoke test $(date -u +%Y%m%dT%H%M%SZ)"
 ALERT_TITLE="Smoke alert $(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -82,6 +87,58 @@ curl -fsS "$BASE_URL/api/incidents/$INCIDENT_ID/timeline" -H "Authorization: Bea
   | jq -e 'map(.type) == ["TRIGGERED", "ACKNOWLEDGED", "RESOLVED"] and all(.actor == "responder")' >/dev/null \
   || fail "timeline does not match the lifecycle"
 
+# wait_for_notifications <incident-id> <count>: polls until the incident has <count> notifications,
+# none still PENDING, and prints them. Delivery is asynchronous and, with Slack down, includes retries.
+wait_for_notifications() {
+  local deadline=$((SECONDS + 30)) found
+  while ((SECONDS < deadline)); do
+    found=$(curl -fsS "$BASE_URL/api/notifications?incidentId=$1" -H "Authorization: Bearer $VIEWER_TOKEN")
+    if jq -e --argjson n "$2" 'length == $n and all(.status != "PENDING")' <<<"$found" >/dev/null; then
+      echo "$found"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+slack_circuit() {
+  curl -fsS "$BASE_URL/api/notifications/channels" -H "Authorization: Bearer $VIEWER_TOKEN" \
+    | jq -r '.[] | select(.channel == "SLACK") | .circuitState // "none"'
+}
+
+echo "8. Every lifecycle step was notified (mock sink + Slack expected '$EXPECT_SLACK')"
+case "$EXPECT_SLACK" in
+  off) EXPECTED_COUNT=3 ;;
+  *) EXPECTED_COUNT=6 ;;
+esac
+NOTIFICATIONS=$(wait_for_notifications "$INCIDENT_ID" "$EXPECTED_COUNT") \
+  || fail "expected $EXPECTED_COUNT finished notifications for the incident within 30 s"
+jq -e '[.[] | select(.channel == "MOCK")] | length == 3 and all(.status == "SENT")' <<<"$NOTIFICATIONS" >/dev/null \
+  || fail "the mock sink did not receive all three lifecycle events"
+case "$EXPECT_SLACK" in
+  sent)
+    jq -e '[.[] | select(.channel == "SLACK")] | all(.status == "SENT")' <<<"$NOTIFICATIONS" >/dev/null \
+      || fail "not every Slack notification was sent"
+    [[ $(slack_circuit) == CLOSED ]] || fail "Slack circuit breaker is not CLOSED"
+    ;;
+  down)
+    jq -e '[.[] | select(.channel == "SLACK")] | all(.status == "FAILED" or .status == "SKIPPED")' \
+      <<<"$NOTIFICATIONS" >/dev/null || fail "Slack is down, yet a Slack notification was not failed or skipped"
+    [[ $(slack_circuit) == OPEN ]] || fail "Slack circuit breaker did not open"
+    ;;
+  off)
+    [[ $(slack_circuit) == none ]] || fail "Slack is reported as configured"
+    ;;
+  *) fail "unknown EXPECT_SLACK value: $EXPECT_SLACK" ;;
+esac
+
+echo "9. notification-service's internal API is not reachable from outside"
+[[ $(status_of -X POST "$BASE_URL/internal/notifications" -H 'Content-Type: application/json' -d '{}') != 200 ]] \
+  || fail "/internal/notifications answered through the public entry point"
+[[ $(status_of -X POST "$BASE_URL/api/internal/notifications" -H "Authorization: Bearer $RESPONDER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}') == 404 ]] || fail "expected 404 for the internal API through the gateway"
+
 # send_alert <api-key>: prints the status of POSTing one alert to the ingest endpoint.
 send_alert() {
   status_of -X POST "$INGEST_URL" \
@@ -107,14 +164,14 @@ wait_for_alert_count() {
   return 1
 }
 
-echo "8. The alert endpoint refuses requests without the ingest key"
+echo "10. The alert endpoint refuses requests without the ingest key"
 [[ $(send_alert wrong-key) == 401 ]] || fail "alert with a wrong key was not rejected"
 
-echo "9. An alert becomes an incident (API Gateway -> Lambda -> SQS -> incident-service)"
+echo "11. An alert becomes an incident (API Gateway -> Lambda -> SQS -> incident-service)"
 [[ $(send_alert "$INGEST_API_KEY") == 202 ]] || fail "alert was not accepted"
 FIRST_ID=$(wait_for_alert_count 1) || fail "alert did not become an incident within 90 s"
 
-echo "10. A repeat of the same alert folds into that incident instead of opening another"
+echo "12. A repeat of the same alert folds into that incident instead of opening another"
 [[ $(send_alert "$INGEST_API_KEY") == 202 ]] || fail "repeat alert was not accepted"
 SECOND_ID=$(wait_for_alert_count 2) || fail "repeat alert was not counted against the open incident"
 [[ "$FIRST_ID" == "$SECOND_ID" ]] || fail "repeat alert opened a different incident"

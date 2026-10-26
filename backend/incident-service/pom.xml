@@ -55,6 +55,21 @@
             <artifactId>spring-cloud-aws-starter-sqs</artifactId>
         </dependency>
 
+        <!-- WebClient for calling notification-service; the service itself stays on servlet + virtual threads. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+        <!-- Versions come from the Spring Cloud BOM, so every module uses the same Resilience4j. -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-reactor</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>

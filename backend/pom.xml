@@ -24,6 +24,7 @@
         <module>alert-ingest-lambda</module>
         <module>auth-service</module>
         <module>incident-service</module>
+        <module>notification-service</module>
         <module>gateway</module>
     </modules>
 

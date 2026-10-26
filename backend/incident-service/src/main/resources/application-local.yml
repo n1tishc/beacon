@@ -13,3 +13,7 @@ spring:
         secret-key: test
       sqs:
         endpoint: http://localhost:4566
+
+beacon:
+  notifications:
+    service-token: local-service-token

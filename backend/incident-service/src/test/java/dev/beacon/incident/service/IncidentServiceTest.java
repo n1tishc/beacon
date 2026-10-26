@@ -4,8 +4,10 @@ import static dev.beacon.incident.TestIncidents.persisted;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
@@ -21,9 +23,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import dev.beacon.incident.domain.IllegalTransitionException;
 import dev.beacon.incident.domain.Incident;
@@ -47,11 +51,16 @@ class IncidentServiceTest {
     @Mock
     private TimelineEntryRepository timeline;
 
+    @Mock
+    private ApplicationEventPublisher events;
+
     private IncidentService service;
 
     @BeforeEach
     void setUp() {
-        service = new IncidentService(repository, timeline, Clock.fixed(NOW, ZoneOffset.UTC));
+        service = serviceAt(NOW);
+        // What the database does on insert: the entry gets its id.
+        lenient().when(timeline.save(any(TimelineEntry.class))).thenAnswer(invocation -> withId(invocation.getArgument(0)));
     }
 
     @Test
@@ -67,12 +76,14 @@ class IncidentServiceTest {
         assertThat(entry.getIncidentId()).isEqualTo(created.getId());
         assertThat(entry.getType()).isEqualTo(TimelineEntryType.TRIGGERED);
         assertThat(entry.getActor()).isEqualTo("riley");
+        assertThat(publishedChange()).isEqualTo(new IncidentChanged(entry.getId(), created.getId(),
+                TimelineEntryType.TRIGGERED, "DB connections exhausted", Severity.CRITICAL, "riley", NOW));
     }
 
     @Test
     void createTruncatesTimestampsToTheDatabasePrecision() {
         Instant withNanos = Instant.parse("2026-01-15T10:00:00.123456789Z");
-        service = new IncidentService(repository, timeline, Clock.fixed(withNanos, ZoneOffset.UTC));
+        service = serviceAt(withNanos);
         when(repository.save(any(Incident.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         Incident created = service.create("Clock skew", null, Severity.LOW, "riley");
@@ -113,6 +124,7 @@ class IncidentServiceTest {
 
         assertThat(incident.getStatus()).isEqualTo(IncidentStatus.ACKNOWLEDGED);
         assertThat(recordedEntry().getType()).isEqualTo(TimelineEntryType.ACKNOWLEDGED);
+        assertThat(publishedChange().type()).isEqualTo(TimelineEntryType.ACKNOWLEDGED);
     }
 
     @Test
@@ -123,6 +135,7 @@ class IncidentServiceTest {
 
         assertThat(incident.getStatus()).isEqualTo(IncidentStatus.RESOLVED);
         assertThat(recordedEntry().getNote()).isEqualTo("Rolled back the deploy");
+        assertThat(publishedChange().type()).isEqualTo(TimelineEntryType.RESOLVED);
     }
 
     @Test
@@ -144,12 +157,13 @@ class IncidentServiceTest {
         assertThatThrownBy(() -> service.acknowledge(incident.getId(), 0, "riley"))
                 .isInstanceOf(IllegalTransitionException.class);
         verify(timeline, never()).save(any());
+        verifyNoInteractions(events);
     }
 
+    /** Notes are for the people already working on the incident; they notify no one. */
     @Test
-    void addNoteAppendsToTheTimelineWithoutTouchingTheIncident() {
+    void addNoteAppendsToTheTimelineWithoutTouchingTheIncidentOrNotifying() {
         Incident incident = stored();
-        when(timeline.save(any(TimelineEntry.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         TimelineEntry entry = service.addNote(incident.getId(), "riley", "Paged the DB team");
 
@@ -157,6 +171,7 @@ class IncidentServiceTest {
         assertThat(entry.getNote()).isEqualTo("Paged the DB team");
         assertThat(incident.getUpdatedAt()).isEqualTo(incident.getCreatedAt());
         verify(repository, never()).save(any());
+        verifyNoInteractions(events);
     }
 
     @Test
@@ -165,6 +180,22 @@ class IncidentServiceTest {
         when(repository.findById(id)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.timeline(id)).isInstanceOf(IncidentNotFoundException.class);
+    }
+
+    private IncidentService serviceAt(Instant now) {
+        return new IncidentService(repository, timeline, new IncidentEventRecorder(timeline, events),
+                Clock.fixed(now, ZoneOffset.UTC));
+    }
+
+    private IncidentChanged publishedChange() {
+        ArgumentCaptor<IncidentChanged> change = ArgumentCaptor.forClass(IncidentChanged.class);
+        verify(events).publishEvent(change.capture());
+        return change.getValue();
+    }
+
+    private static TimelineEntry withId(TimelineEntry entry) {
+        ReflectionTestUtils.setField(entry, "id", 41L);
+        return entry;
     }
 
     private Incident stored() {

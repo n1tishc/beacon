@@ -4,6 +4,7 @@ import { NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angula
 import { RouterLink } from '@angular/router';
 
 import { AuthStore } from '../../core/auth/auth-store';
+import { IncidentNotifications } from '../../notifications/incident-notifications/incident-notifications';
 import { IncidentTimeline } from '../incident-timeline/incident-timeline';
 import { canAcknowledge, canResolve } from '../incident.model';
 import { IncidentDetailStore } from './incident-detail-store';
@@ -11,7 +12,14 @@ import { IncidentDetailStore } from './incident-detail-store';
 @Component({
   selector: 'app-incident-detail-page',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DatePipe, LowerCasePipe, ReactiveFormsModule, RouterLink, IncidentTimeline],
+  imports: [
+    DatePipe,
+    LowerCasePipe,
+    ReactiveFormsModule,
+    RouterLink,
+    IncidentNotifications,
+    IncidentTimeline,
+  ],
   providers: [IncidentDetailStore],
   templateUrl: './incident-detail-page.html',
   styleUrl: './incident-detail-page.scss',

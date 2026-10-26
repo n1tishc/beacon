@@ -15,8 +15,7 @@ import dev.beacon.incident.domain.AlertRepository;
 import dev.beacon.incident.domain.Incident;
 import dev.beacon.incident.domain.IncidentRepository;
 import dev.beacon.incident.domain.Severity;
-import dev.beacon.incident.domain.TimelineEntry;
-import dev.beacon.incident.domain.TimelineEntryRepository;
+import dev.beacon.incident.service.IncidentEventRecorder;
 
 /**
  * Turns one alert into an incident, or folds it into the open incident with the same fingerprint.
@@ -46,14 +45,14 @@ public class AlertIngestionService {
 
     private final IncidentRepository incidents;
     private final AlertRepository alerts;
-    private final TimelineEntryRepository timeline;
+    private final IncidentEventRecorder recorder;
     private final Clock clock;
 
     public AlertIngestionService(IncidentRepository incidents, AlertRepository alerts,
-                                 TimelineEntryRepository timeline, Clock clock) {
+                                 IncidentEventRecorder recorder, Clock clock) {
         this.incidents = incidents;
         this.alerts = alerts;
-        this.timeline = timeline;
+        this.recorder = recorder;
         this.clock = clock;
     }
 
@@ -78,7 +77,8 @@ public class AlertIngestionService {
         } else {
             Incident incident = incidents.save(Incident.triggerFromAlert(alert.title(), alert.description(),
                     severity, alert.source(), alert.fingerprint(), receivedAt, now));
-            timeline.save(TimelineEntry.of(incident.triggeredBy("alert:" + alert.source())));
+            // Repeats (above) notify no one: the incident is already open and its responders know.
+            recorder.record(incident, incident.triggeredBy("alert:" + alert.source()));
             result = new Result(Outcome.CREATED, incident.getId());
         }
 

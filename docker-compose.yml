@@ -2,8 +2,8 @@
 # Every value has a working local default; copy .env.example to .env to override.
 #
 # Only `web` (the UI) and `gateway` (the API) are published to the host, plus LocalStack (the
-# alert endpoint, on 127.0.0.1 only). The services behind the gateway are reachable only on the
-# compose network, as they would be in production.
+# alert endpoint) and fake-slack, both on 127.0.0.1 only. The services behind the gateway are
+# reachable only on the compose network, as they would be in production.
 name: beacon
 
 x-database-env: &database-env
@@ -93,6 +93,9 @@ services:
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
+      NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:-local-service-token}
+    # Deliberately no depends_on notification-service: incidents must work while it is down.
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,6 +109,40 @@ services:
       start_period: 10s
     mem_limit: 512m
 
+  # Delivers incident notifications to Slack and the mock sink. Nothing depends on it starting.
+  notification-service:
+    build:
+      context: ./backend
+      args:
+        SERVICE: notification-service
+    environment:
+      <<: *database-env
+      AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
+      NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:-local-service-token}
+      # The fake Slack below unless .env points at a real workspace's webhook (a secret).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-http://fake-slack:8080/services/T0000/B0000/local-fake-slack}
+      BEACON_PUBLIC_URL: http://localhost:${WEB_PORT:-4200}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 512m
+
+  # Answers like a Slack incoming webhook. `docker compose stop fake-slack` simulates a Slack outage.
+  fake-slack:
+    image: wiremock/wiremock:3.13.2
+    command: ["--disable-banner"]
+    volumes:
+      - ./infra/fake-slack/mappings:/home/wiremock/mappings:ro
+    ports:
+      # Bound to localhost: its admin API (what was "posted") is for inspection only.
+      - "127.0.0.1:${FAKE_SLACK_PORT:-8089}:8080"
+
   gateway:
     build:
       context: ./backend
@@ -114,6 +151,7 @@ services:
     environment:
       AUTH_SERVICE_URL: http://auth-service:8082
       INCIDENT_SERVICE_URL: http://incident-service:8081
+      NOTIFICATION_SERVICE_URL: http://notification-service:8083
       AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
       # nginx (web) is the one proxy in front of the gateway.
       TRUSTED_PROXY_HOPS: "1"

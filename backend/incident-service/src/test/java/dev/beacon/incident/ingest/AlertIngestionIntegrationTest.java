@@ -56,7 +56,7 @@ import dev.beacon.incident.service.IncidentService;
 // @Testcontainers comes first so its extension runs last on teardown: the listener stops (the context is
 // closed by @DirtiesContext) before LocalStack does, instead of polling a queue that is gone.
 @Testcontainers
-@SpringBootTest(properties = "beacon.alerts.queue=" + AlertIngestionIntegrationTest.QUEUE)
+@SpringBootTest(properties = {"beacon.alerts.queue=" + AlertIngestionIntegrationTest.QUEUE, "beacon.notifications.enabled=false"})
 @Import(PostgresTestcontainer.class)
 @DirtiesContext
 class AlertIngestionIntegrationTest {

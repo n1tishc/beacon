@@ -1,27 +1,12 @@
 import { DOCUMENT } from '@angular/common';
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
-import {
-  EMPTY,
-  Observable,
-  catchError,
-  distinctUntilChanged,
-  exhaustMap,
-  finalize,
-  fromEvent,
-  map,
-  startWith,
-  switchMap,
-  tap,
-  timer,
-} from 'rxjs';
+import { EMPTY, Observable, catchError, exhaustMap, finalize, map, tap } from 'rxjs';
 
 import { AuthStore } from '../core/auth/auth-store';
 import { fieldErrors, problemMessage } from '../core/problem-message';
+import { LIVE_REFRESH_MS, whileVisible } from '../core/while-visible';
 import { IncidentApi } from './incident-api';
 import { CreateIncidentRequest, Incident, Page } from './incident.model';
-
-/** How often the dashboard polls while it is visible. */
-export const LIVE_REFRESH_MS = 5000;
 
 interface IncidentState {
   incidents: Incident[];
@@ -99,16 +84,7 @@ export class IncidentStore {
    * when it is destroyed).
    */
   live(periodMs = LIVE_REFRESH_MS): Observable<void> {
-    const visible$ = fromEvent(this.document, 'visibilitychange').pipe(
-      map(() => !this.document.hidden),
-      startWith(!this.document.hidden),
-      distinctUntilChanged(),
-    );
-    return visible$.pipe(
-      // On first subscription the caller has just loaded, so wait a period; on return to the tab, refresh now.
-      switchMap((visible, index) =>
-        visible ? timer(index === 0 ? periodMs : 0, periodMs) : EMPTY,
-      ),
+    return whileVisible(this.document, periodMs).pipe(
       exhaustMap(() => {
         const changesBefore = this.localChanges;
         return this.api.list().pipe(

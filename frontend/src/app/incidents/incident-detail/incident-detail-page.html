@@ -132,6 +132,11 @@
       } @else if (incident.status === 'RESOLVED') {
         <p class="muted closed">This incident is resolved.</p>
       }
+
+      <section class="notifications" aria-labelledby="notifications-heading">
+        <h2 id="notifications-heading">Notifications</h2>
+        <app-incident-notifications [incidentId]="incident.id" />
+      </section>
     </aside>
   </div>
 } @else if (store.loading()) {
