@@ -65,21 +65,24 @@ Run Postgres in Docker and the apps on your machine, with hot reload.
 
 **Requirements:** JDK 21 and Node 22.22+. Maven is not needed because the repo ships the Maven wrapper.
 
+From the repo root:
+
 ```bash
 # 1. Database only
 docker compose up -d postgres
 
-# 2. Backend on :8081 (the `local` profile points at the Postgres container)
-cd backend
-./mvnw -pl incident-service spring-boot:run -Dspring-boot.run.profiles=local
-
-# 3. Frontend on :4200 (ng serve proxies /api to :8081, see frontend/proxy.conf.json)
-cd frontend
-npm ci
-npm start
+# 2. Backend on :8081 (the `local` profile points at the Postgres container). Runs in the foreground.
+cd backend && ./mvnw -pl incident-service spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-If you run this alongside the full Compose stack, stop the Compose `incident-service` and `web` containers first, since they use the same ports.
+Then, in a second terminal from the repo root:
+
+```bash
+# 3. Frontend on :4200 (ng serve proxies /api to :8081, see frontend/proxy.conf.json)
+cd frontend && npm ci && npm start
+```
+
+If you run this alongside the full Compose stack, stop the Compose `incident-service` and `web` containers first, since they use the same ports. The `local` profile assumes the default `beacon` credentials.
 
 ## Tests
 
@@ -93,7 +96,7 @@ The JaCoCo HTML report is at `backend/incident-service/target/site/jacoco/index.
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo report uploaded as an artifact
 - the Angular tests and production build
-- `docker compose build`, which proves the one-command setup works on a clean machine
+- `docker compose up --build`, followed by a smoke test that creates and lists an incident through the nginx proxy. This covers real Postgres and the Flyway migrations, and proves the one-command setup works on a clean machine.
 
 ## API
 

@@ -57,12 +57,25 @@ jobs:
       - name: Production build
         run: npm run build
 
-  images:
-    name: Docker images build
+  stack:
+    name: Docker Compose · build & smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      # Proves `docker compose up --build` works on a machine with nothing but Docker installed.
-      - name: Build every image in docker-compose.yml
-        run: docker compose build
+      # Proves `docker compose up --build` works on a machine with nothing but Docker installed,
+      # and that the entities match the Flyway schema (ddl-auto=validate fails startup otherwise).
+      - name: Build images and start the stack
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - name: Create and list an incident through the web proxy
+        run: |
+          curl -fsS -X POST http://localhost:4200/api/incidents \
+            -H 'Content-Type: application/json' \
+            -d '{"title": "CI smoke test", "severity": "LOW"}'
+          curl -fsS http://localhost:4200/api/incidents | grep -q '"title":"CI smoke test"'
+      - name: Service logs
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
