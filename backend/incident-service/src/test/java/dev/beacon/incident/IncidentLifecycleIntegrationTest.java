@@ -24,6 +24,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 import com.jayway.jsonpath.JsonPath;
 
+import dev.beacon.incident.storage.StorageProperties;
 import dev.beacon.security.Role;
 
 /**
@@ -38,6 +39,15 @@ class IncidentLifecycleIntegrationTest {
 
     @Autowired
     private MockMvc mvc;
+
+    @Autowired
+    private StorageProperties storage;
+
+    /** As in AWS, S3_PUBLIC_ENDPOINT is unset here: presigned URLs must then use S3's own endpoint. */
+    @Test
+    void anUnsetPublicS3EndpointMeansTheDefaultOne() {
+        assertThat(storage.publicEndpoint()).isNull();
+    }
 
     @Test
     void triggerAcknowledgeNoteResolve() throws Exception {

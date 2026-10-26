@@ -375,7 +375,8 @@ Postmortems run against a real Postgres and LocalStack S3 with signature checks 
 - S3 refusing a different type, a larger body and a different key on the signed URL
 - completing before uploading (`409`), and an object that doesn't match being deleted with its row
 - HTML, SVG and 10 MB + 1 byte refused with no URL issued; attachments only reachable under their own incident
-- viewers reading but not writing; and an S3 outage answering `503`
+
+`PostmortemSecurityTest` adds the role checks with real tokens (viewers read but can't write or upload), and a simulated AWS SDK failure mapped to `503`.
 
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
