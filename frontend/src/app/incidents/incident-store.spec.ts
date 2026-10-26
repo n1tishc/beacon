@@ -1,7 +1,9 @@
 import { HttpErrorResponse } from '@angular/common/http';
+import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
 
+import { AuthStore } from '../core/auth/auth-store';
 import { IncidentApi } from './incident-api';
 import { IncidentStore } from './incident-store';
 import { aPageOf, anIncident } from './testing/incident-fixtures';
@@ -9,10 +11,17 @@ import { aPageOf, anIncident } from './testing/incident-fixtures';
 describe('IncidentStore', () => {
   let store: IncidentStore;
   let api: { list: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
+  const isAuthenticated = signal(true);
 
   beforeEach(() => {
     api = { list: vi.fn(), create: vi.fn() };
-    TestBed.configureTestingModule({ providers: [{ provide: IncidentApi, useValue: api }] });
+    isAuthenticated.set(true);
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: IncidentApi, useValue: api },
+        { provide: AuthStore, useValue: { isAuthenticated } },
+      ],
+    });
     store = TestBed.inject(IncidentStore);
   });
 
@@ -68,5 +77,16 @@ describe('IncidentStore', () => {
     expect(next).not.toHaveBeenCalled();
     expect(store.error()).toContain('Cannot reach the Beacon API');
     expect(store.saving()).toBe(false);
+  });
+
+  it('forgets everything when the user signs out', () => {
+    api.list.mockReturnValue(of(aPageOf([anIncident()])));
+    store.load();
+
+    isAuthenticated.set(false);
+    TestBed.tick();
+
+    expect(store.incidents()).toEqual([]);
+    expect(store.total()).toBe(0);
   });
 });

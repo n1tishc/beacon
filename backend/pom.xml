@@ -19,17 +19,37 @@
     <description>Parent build for the Beacon incident management services</description>
 
     <modules>
+        <module>security-common</module>
+        <module>auth-service</module>
         <module>incident-service</module>
+        <module>gateway</module>
     </modules>
 
     <properties>
         <java.version>21</java.version>
         <spring-cloud.version>2025.0.3</spring-cloud.version>
         <jacoco.version>0.8.15</jacoco.version>
+        <wiremock.version>3.13.2</wiremock.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>dev.beacon</groupId>
+                <artifactId>security-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>dev.beacon</groupId>
+                <artifactId>security-common</artifactId>
+                <version>${project.version}</version>
+                <type>test-jar</type>
+            </dependency>
+            <dependency>
+                <groupId>org.wiremock</groupId>
+                <artifactId>wiremock-standalone</artifactId>
+                <version>${wiremock.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.cloud</groupId>
                 <artifactId>spring-cloud-dependencies</artifactId>
@@ -41,6 +61,8 @@
     </dependencyManagement>
 
     <build>
+        <!-- Stable jar names (target/<module>.jar) so one Dockerfile can build every service. -->
+        <finalName>${project.artifactId}</finalName>
         <pluginManagement>
             <plugins>
                 <plugin>

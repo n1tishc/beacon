@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            # Login is rate limited per client IP to slow down password guessing.
+            - id: auth-login
+              uri: ${AUTH_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/auth/login
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    rate-limiter: "#{@inMemoryRateLimiter}"
+                    key-resolver: "#{@clientIpKeyResolver}"
+            - id: auth
+              uri: ${AUTH_SERVICE_URL:http://localhost:8082}
+              predicates:
+                - Path=/api/auth/**,/api/users/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    rate-limiter: "#{@inMemoryRateLimiter}"
+                    key-resolver: "#{@userOrClientIpKeyResolver}"
+            - id: incidents
+              uri: ${INCIDENT_SERVICE_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/incidents/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    rate-limiter: "#{@inMemoryRateLimiter}"
+                    key-resolver: "#{@userOrClientIpKeyResolver}"
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 10s
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys come from auth-service; tokens must also carry this issuer.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8082/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:beacon-auth}
+
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+
+beacon:
+  gateway:
+    rate-limit:
+      trusted-proxy-hops: ${TRUSTED_PROXY_HOPS:1}
+      default-limit:
+        capacity: ${RATE_LIMIT_API_CAPACITY:100}
+        period: ${RATE_LIMIT_API_PERIOD:10s}
+      routes:
+        auth-login:
+          capacity: ${RATE_LIMIT_LOGIN_CAPACITY:10}
+          period: ${RATE_LIMIT_LOGIN_PERIOD:1m}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

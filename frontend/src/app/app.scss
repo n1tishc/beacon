@@ -48,6 +48,44 @@ nav a.active {
   background: rgb(255 255 255 / 0.08);
 }
 
+.account {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+  font-size: 0.875rem;
+}
+
+.account-role {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 999px;
+  color: var(--topbar-muted);
+  font-size: 0.75rem;
+}
+
+.sign-out {
+  border-color: rgb(255 255 255 / 0.2);
+  background: transparent;
+  color: var(--topbar-text);
+}
+
+.sign-out:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.08);
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    gap: 1rem;
+    padding: 0 1rem;
+  }
+
+  .account-name,
+  .account-role {
+    display: none;
+  }
+}
+
 main {
   max-width: 80rem;
   margin: 0 auto;

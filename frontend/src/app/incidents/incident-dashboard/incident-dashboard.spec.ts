@@ -1,18 +1,34 @@
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 
+import { AuthStore } from '../../core/auth/auth-store';
+import { Role } from '../../core/auth/auth.model';
 import { Incident, Page } from '../incident.model';
 import { aPageOf, anIncident } from '../testing/incident-fixtures';
 import { IncidentDashboard } from './incident-dashboard';
 
 describe('IncidentDashboard', () => {
   let http: HttpTestingController;
+  let role: Role;
 
   beforeEach(async () => {
+    role = 'RESPONDER';
+    const rank: Record<Role, number> = { VIEWER: 0, RESPONDER: 1, ADMIN: 2 };
     await TestBed.configureTestingModule({
       imports: [IncidentDashboard],
-      providers: [provideHttpClient(), provideHttpClientTesting()],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        {
+          provide: AuthStore,
+          useValue: {
+            isAuthenticated: signal(true),
+            hasRole: (required: Role) => rank[role] >= rank[required],
+          },
+        },
+      ],
     }).compileComponents();
     http = TestBed.inject(HttpTestingController);
   });
@@ -47,5 +63,18 @@ describe('IncidentDashboard', () => {
     const element = await renderWith(aPageOf([]));
 
     expect(element.querySelector('.empty')?.textContent).toContain('No incidents yet');
+  });
+
+  it('offers the trigger form to responders', async () => {
+    const element = await renderWith(aPageOf([]));
+
+    expect(element.querySelector('app-create-incident-form')).not.toBeNull();
+  });
+
+  it('hides the trigger form from viewers', async () => {
+    role = 'VIEWER';
+    const element = await renderWith(aPageOf([]));
+
+    expect(element.querySelector('app-create-incident-form')).toBeNull();
   });
 });

@@ -1,0 +1,41 @@
+<section class="card login" aria-labelledby="login-heading">
+  <h1 id="login-heading">Sign in to Beacon</h1>
+  <p class="subtitle">Incident response for your on-call team.</p>
+
+  @if (error(); as message) {
+    <div class="alert" role="alert">{{ message }}</div>
+  }
+
+  <form [formGroup]="form" (ngSubmit)="submit()" novalidate>
+    <div class="field">
+      <label for="login-username">Username</label>
+      <input
+        id="login-username"
+        formControlName="username"
+        autocomplete="username"
+        autocapitalize="none"
+        spellcheck="false"
+        [attr.aria-invalid]="form.controls.username.touched && form.controls.username.invalid"
+      />
+    </div>
+
+    <div class="field">
+      <label for="login-password">Password</label>
+      <input
+        id="login-password"
+        type="password"
+        formControlName="password"
+        autocomplete="current-password"
+        [attr.aria-invalid]="form.controls.password.touched && form.controls.password.invalid"
+      />
+    </div>
+
+    @if (form.touched && form.invalid) {
+      <p class="field-error">Enter your username and password.</p>
+    }
+
+    <button type="submit" class="primary" [disabled]="submitting()">
+      {{ submitting() ? 'Signing in…' : 'Sign in' }}
+    </button>
+  </form>
+</section>

@@ -1,6 +1,7 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import { EMPTY, Observable, catchError, finalize, tap } from 'rxjs';
 
+import { AuthStore } from '../core/auth/auth-store';
 import { problemMessage } from '../core/problem-message';
 import { IncidentApi } from './incident-api';
 import { CreateIncidentRequest, Incident } from './incident.model';
@@ -28,7 +29,17 @@ const initialState: IncidentState = {
 @Injectable({ providedIn: 'root' })
 export class IncidentStore {
   private readonly api = inject(IncidentApi);
+  private readonly auth = inject(AuthStore);
   private readonly state = signal<IncidentState>(initialState);
+
+  constructor() {
+    // Never show one user's data to the next person who signs in on this tab.
+    effect(() => {
+      if (!this.auth.isAuthenticated()) {
+        untracked(() => this.state.set(initialState));
+      }
+    });
+  }
 
   readonly incidents = computed(() => this.state().incidents);
   readonly total = computed(() => this.state().total);

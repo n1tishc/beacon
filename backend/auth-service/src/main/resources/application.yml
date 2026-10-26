@@ -1,0 +1,54 @@
+# Base configuration. Anything environment-specific comes from env vars;
+# the `local` profile supplies defaults for running on a laptop.
+spring:
+  application:
+    name: auth-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: auth
+  # Each service owns one schema in the shared database and never touches another's tables.
+  flyway:
+    schemas: auth
+    default-schema: auth
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${PORT:8082}
+  shutdown: graceful
+
+beacon:
+  auth:
+    issuer: ${JWT_ISSUER:beacon-auth}
+    access-token-ttl: ${ACCESS_TOKEN_TTL:15m}
+    refresh-token-ttl: ${REFRESH_TOKEN_TTL:7d}
+    secure-cookie: ${AUTH_SECURE_COOKIE:true}
+    signing-key: ${JWT_SIGNING_KEY:}
+    demo-users:
+      enabled: ${DEMO_USERS_ENABLED:false}
+      password: ${DEMO_USER_PASSWORD:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

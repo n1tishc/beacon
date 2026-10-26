@@ -67,12 +67,9 @@ jobs:
       # and that the entities match the Flyway schema (ddl-auto=validate fails startup otherwise).
       - name: Build images and start the stack
         run: docker compose up --build --detach --wait --wait-timeout 180
-      - name: Create and list an incident through the web proxy
-        run: |
-          curl -fsS -X POST http://localhost:4200/api/incidents \
-            -H 'Content-Type: application/json' \
-            -d '{"title": "CI smoke test", "severity": "LOW"}'
-          curl -fsS http://localhost:4200/api/incidents | grep -q '"title":"CI smoke test"'
+      # Logs in as each demo role through nginx -> gateway -> services and checks 401/403/201.
+      - name: Smoke test through the web proxy
+        run: scripts/smoke-test.sh http://localhost:4200
       - name: Service logs
         if: failure()
         run: docker compose logs

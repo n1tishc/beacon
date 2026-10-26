@@ -11,6 +11,6 @@ RUN NG_CLI_ANALYTICS=false npx ng build
 
 FROM nginx:1.29-alpine
 # The official nginx image runs envsubst over /etc/nginx/templates/*.template at startup.
-ENV API_UPSTREAM=http://incident-service:8081
+ENV API_UPSTREAM=http://gateway:8080
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist/beacon-web/browser /usr/share/nginx/html

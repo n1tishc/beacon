@@ -14,17 +14,27 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: incident
+  # Each service owns one schema in the shared database and never touches another's tables.
   flyway:
-    enabled: true
+    schemas: incident
+    default-schema: incident
   mvc:
     problemdetails:
       enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Public keys come from auth-service; tokens must also carry this issuer.
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8082/.well-known/jwks.json}
+          issuer-uri: ${JWT_ISSUER:beacon-auth}
 
 server:
   port: ${PORT:8081}
   shutdown: graceful
-  # Build Location headers and redirects from X-Forwarded-* set by the proxy in front of us.
-  forward-headers-strategy: framework
 
 management:
   endpoints:
