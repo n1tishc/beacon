@@ -12,7 +12,7 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 |---|-------|--------|
 | 1 | Walking skeleton: incident-service, Angular shell, Postgres, Docker Compose, CI | ✅ Shipped |
 | 2 | Auth: auth-service, gateway, JWT, roles, guards | ✅ Shipped |
-| 3 | Incident lifecycle: state machine, timeline, optimistic locking, Testcontainers | Planned |
+| 3 | Incident lifecycle: state machine, timeline, optimistic locking, Testcontainers | ✅ Shipped |
 | 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | Planned |
 | 5 | Notifications: notification-service, Slack, Resilience4j | Planned |
 | 6 | Postmortems: editor, S3 presigned uploads | Planned |
@@ -26,7 +26,7 @@ flowchart LR
     browser([Browser]) -->|":4200"| web["web<br/>nginx + Angular build"]
     web -->|"/api/*"| gateway["gateway :8080<br/>Spring Cloud Gateway<br/>JWT check · rate limits"]
     gateway -->|"/api/auth/**<br/>/api/users/**"| auth["auth-service :8082<br/>users · tokens"]
-    gateway -->|"/api/incidents/**"| incident["incident-service :8081<br/>incidents"]
+    gateway -->|"/api/incidents/**"| incident["incident-service :8081<br/>incidents · timeline"]
     gateway -.->|"public keys (JWKS)"| auth
     incident -.->|"public keys (JWKS)"| auth
     auth --> pg[("PostgreSQL 17<br/>schemas: auth, incident")]
@@ -60,6 +60,27 @@ sequenceDiagram
     B->>G: retry GET /api/incidents → 200
 ```
 
+### The incident lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> TRIGGERED: trigger
+    TRIGGERED --> ACKNOWLEDGED: acknowledge
+    TRIGGERED --> RESOLVED: resolve
+    ACKNOWLEDGED --> RESOLVED: resolve
+    RESOLVED --> [*]
+```
+
+- **The transitions are code, in one place.** `IncidentStatus.canTransitionTo` is a `switch` over the enum. `Incident.acknowledge()` and `resolve()` are the only ways to change the status, and they throw on anything the table doesn't allow. A parameterized test lists all nine (from, to) pairs.
+- **TRIGGERED → RESOLVED is allowed on purpose.** An alert that clears on its own, or a false positive, shouldn't need a ceremonial acknowledge first. PagerDuty works the same way. RESOLVED is terminal; a recurrence opens a new incident.
+- **Every change lands on the timeline in the same transaction.** Domain methods return an event from a sealed `IncidentEvent` interface (`Triggered`, `Acknowledged`, `Resolved`, `NoteAdded`). The service persists each one as an append-only `timeline_entries` row. Because the interface is sealed, the `switch` that maps events to rows is checked by the compiler, so a new event type can't be silently forgotten.
+- **Optimistic locking, at two levels.**
+  1. Every command carries the `version` the user was looking at. If the incident has changed since, the API answers `409 Incident changed` instead of acting on a state the user never saw.
+  2. Hibernate's `@Version` column catches two commands that pass that check at the same moment: the second `UPDATE … WHERE version = ?` matches no row, and the transaction fails with the same 409.
+
+  An integration test fires eight concurrent acknowledges at one incident and checks that exactly one wins and exactly one timeline entry is written.
+- **The UI reacts to the 409.** It reloads the incident and its timeline, keeps whatever the user had typed, and says that someone else changed it. The user then decides again with the current state in front of them.
+
 ## Quick start
 
 The only prerequisite is Docker (Docker Desktop, or Docker Engine with Compose v2).
@@ -73,7 +94,7 @@ Open http://localhost:4200 and sign in with one of the demo accounts. The passwo
 | Username | Role | Can |
 |----------|------|-----|
 | `viewer` | VIEWER | view incidents |
-| `responder` | RESPONDER | view and trigger incidents |
+| `responder` | RESPONDER | view, trigger, acknowledge and resolve incidents, add notes |
 | `admin` | ADMIN | everything, plus manage users |
 
 | What | URL |
@@ -97,6 +118,13 @@ curl -i -X POST localhost:8080/api/incidents \
   -d '{"title": "Checkout API returning 502s", "severity": "CRITICAL"}'
 
 curl localhost:8080/api/incidents -H "Authorization: Bearer $TOKEN"
+
+# Acknowledge it. Send the version you last saw; a stale one gets a 409.
+ID=$(curl -s localhost:8080/api/incidents -H "Authorization: Bearer $TOKEN" | jq -r '.content[0].id')
+curl -X POST localhost:8080/api/incidents/$ID/acknowledge \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"version": 0}'
+
+curl localhost:8080/api/incidents/$ID/timeline -H "Authorization: Bearer $TOKEN"
 ```
 
 `scripts/smoke-test.sh` runs the same kind of checks against any running stack (it needs `jq`). CI runs it too.
@@ -160,10 +188,16 @@ auth-service's flow test runs against a real Postgres (Testcontainers). It cover
 - logout
 - admin-only user management
 
+incident-service's integration tests also run against a real Postgres:
+- the full lifecycle over HTTP, including the timeline's order and actors, a stale-version 409 that changes nothing, and an illegal transition
+- eight threads acknowledging the same incident at once, with exactly one winner
+- a deterministic case where only the `@Version` column can stop a lost update
+- the V2 migration run against a database that already holds V1 data, checking the backfill and the new constraints
+
 CI (`.github/workflows/ci.yml`) runs three parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
-- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services.
+- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline.
 
 ## API
 
@@ -180,8 +214,19 @@ All endpoints go through the gateway. Errors use [RFC 7807](https://www.rfc-edit
 | `POST` | `/api/incidents` | RESPONDER | Trigger an incident: `{title, description?, severity}`. `201` with a relative `Location` header. |
 | `GET` | `/api/incidents?page&size` | VIEWER | Incidents, newest first. `size` is limited to 1–100. |
 | `GET` | `/api/incidents/{id}` | VIEWER | A single incident, or a `404` problem response. |
+| `POST` | `/api/incidents/{id}/acknowledge` | RESPONDER | `{version}`. `409 Incident changed` if `version` is stale, `409 Transition not allowed` if the state machine says no. |
+| `POST` | `/api/incidents/{id}/resolve` | RESPONDER | `{version, note?}`. Same `409`s as acknowledge. |
+| `GET` | `/api/incidents/{id}/timeline` | VIEWER | Everything that happened to the incident, oldest first: type, actor, time, note. |
+| `POST` | `/api/incidents/{id}/notes` | RESPONDER | `{text}`. Appends a note to the timeline. `201`. Notes don't change the incident, so they need no version. |
 
 Roles are hierarchical, ADMIN > RESPONDER > VIEWER, so "RESPONDER" means RESPONDER or ADMIN.
+
+A validation failure is a `400` whose problem body lists each bad field, which the UI shows next to the matching input:
+
+```json
+{ "status": 400, "title": "Invalid request", "detail": "Some fields are missing or invalid.",
+  "errors": [{ "field": "title", "message": "must not be blank" }] }
+```
 
 ## Repository layout
 
@@ -195,7 +240,7 @@ backend/                Maven multi-module build
 frontend/               Angular 22 app (standalone components, signals, zoneless)
   src/app/core/auth/    Auth store, interceptor, guards
   src/app/login/        Login page
-  src/app/incidents/    Feature folder: API client, signal store, dashboard, table, form
+  src/app/incidents/    Feature folder: API client, stores, dashboard, table, form, detail page, timeline
   nginx/                nginx config used by the frontend container
 scripts/smoke-test.sh   End-to-end checks against a running stack
 docker-compose.yml      The whole local stack
@@ -259,7 +304,13 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 
 - **Schema is owned by Flyway; Hibernate only validates it** (`ddl-auto: validate`). The app refuses to start if the entities and the migrations disagree. Each service migrates only its own schema (`spring.flyway.schemas`).
 - **DTOs are Java records, validated with Bean Validation at the controller boundary.** Entities never leave the service through the API. Paging uses a small `PageResponse` record instead of Spring's `PageImpl`, so the JSON shape is a deliberate contract.
-- **Errors are RFC 7807 problem details**, via `spring.mvc.problemdetails.enabled`, `ErrorResponseException` subclasses and, in auth-service, a small `@RestControllerAdvice`. Slice 3 adds field-level validation errors.
+- **Errors are RFC 7807 problem details.** In incident-service one `@RestControllerAdvice` (`ApiExceptionHandler`) maps everything:
+  - Domain exceptions are plain `RuntimeException`s that know nothing about HTTP; the advice maps them to `404`/`409`.
+  - It extends `ResponseEntityExceptionHandler`, so Spring MVC's own errors (malformed JSON, unknown routes) come out in the same format.
+  - Both kinds of validation failure, `@Valid` bodies and constrained `@RequestParam`s, produce the same `errors: [{field, message}]` list.
+  - There is deliberately no catch-all `Exception` handler, because it would turn Spring Security's 403s into 500s. The role tests guard that.
+- **The command order is fixed: not found, then stale version, then illegal transition.** A stale client is always told to reload, which helps, rather than getting a transition error that reloading would explain.
+- **Ids are assigned by the entity, not the database.** The `Triggered` event can then carry the id before the first save. The version field is a `Long`, so Spring Data still recognises a new entity (`version == null`) and inserts it instead of merging.
 - **Virtual threads** (`spring.threads.virtual.enabled`) let blocking JDBC code scale without a reactive rewrite. The gateway is the exception: it is reactive (WebFlux/Netty), as Spring Cloud Gateway is built.
 - **Time comes from an injected `Clock`**, truncated to Postgres' microsecond precision. Tests are deterministic, and a create response matches a later read exactly.
 - **JVM sizing is decided up front.** The AWS deployment runs several services on one 1 GB t3.micro, so the images default to SerialGC and a percentage-based heap.
@@ -268,5 +319,6 @@ No secrets are committed. Real credentials come from GitHub Actions secrets and,
 
 - **Stores are plain signals services** (`AuthStore`, `IncidentStore`): private writable state, public `computed` selectors, and methods as the only way to change state. That is enough structure for this app without the NgRx boilerplate. `IncidentStore` clears itself when the user signs out.
 - **Route guards use `canMatch`, not `canActivate`**, so a signed-out visitor never downloads the lazy-loaded feature chunk. After login the user returns to `returnUrl`, which only accepts in-app paths.
-- **Role checks in the UI are a courtesy.** Viewers don't see the trigger form, but the API is what enforces it.
+- **Role checks in the UI are a courtesy.** Viewers don't see the trigger form or the acknowledge/resolve controls, but the API is what enforces it. The buttons shown follow the same transition table as the backend (`canAcknowledge`, `canResolve`).
+- **The detail page has its own store**, provided by the component rather than in root, so it lives and dies with the page. Commands return cold Observables, so nothing happens until the component subscribes. After every command the store reloads the incident and its timeline, so the page shows what the server has, not a guess.
 - **OnPush everywhere.** OnPush is Angular 22's default, but components still declare it explicitly so readers who know older Angular can see it.

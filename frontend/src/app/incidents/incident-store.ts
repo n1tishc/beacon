@@ -2,7 +2,7 @@ import { Injectable, computed, effect, inject, signal, untracked } from '@angula
 import { EMPTY, Observable, catchError, finalize, tap } from 'rxjs';
 
 import { AuthStore } from '../core/auth/auth-store';
-import { problemMessage } from '../core/problem-message';
+import { fieldErrors, problemMessage } from '../core/problem-message';
 import { IncidentApi } from './incident-api';
 import { CreateIncidentRequest, Incident } from './incident.model';
 
@@ -12,6 +12,8 @@ interface IncidentState {
   loading: boolean;
   saving: boolean;
   error: string | null;
+  /** Server-side validation messages for the create form, keyed by field. */
+  fieldErrors: Record<string, string>;
 }
 
 const initialState: IncidentState = {
@@ -20,6 +22,7 @@ const initialState: IncidentState = {
   loading: false,
   saving: false,
   error: null,
+  fieldErrors: {},
 };
 
 /**
@@ -46,6 +49,7 @@ export class IncidentStore {
   readonly loading = computed(() => this.state().loading);
   readonly saving = computed(() => this.state().saving);
   readonly error = computed(() => this.state().error);
+  readonly fieldErrors = computed(() => this.state().fieldErrors);
 
   load(): void {
     this.patch({ loading: true, error: null });
@@ -58,7 +62,7 @@ export class IncidentStore {
 
   /** Emits the created incident on success; on failure the error lands in `error()` and nothing is emitted. */
   create(request: CreateIncidentRequest): Observable<Incident> {
-    this.patch({ saving: true, error: null });
+    this.patch({ saving: true, error: null, fieldErrors: {} });
     return this.api.create(request).pipe(
       tap((incident) =>
         this.state.update((state) => ({
@@ -68,7 +72,7 @@ export class IncidentStore {
         })),
       ),
       catchError((error) => {
-        this.patch({ error: problemMessage(error) });
+        this.patch({ error: problemMessage(error), fieldErrors: fieldErrors(error) });
         return EMPTY;
       }),
       finalize(() => this.patch({ saving: false })),

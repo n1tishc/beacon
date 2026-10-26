@@ -1,0 +1,123 @@
+<a routerLink="/incidents" class="back">← All incidents</a>
+
+@if (store.notice(); as notice) {
+  <div class="notice" role="status" data-testid="notice">{{ notice }}</div>
+}
+@if (store.error(); as error) {
+  <div class="alert" role="alert">{{ error }}</div>
+}
+
+@if (store.incident(); as incident) {
+  <header class="page-header">
+    <div class="badges">
+      <span class="severity severity-{{ incident.severity | lowercase }}">{{
+        incident.severity
+      }}</span>
+      <span class="status status-{{ incident.status | lowercase }}" data-testid="status">{{
+        incident.status
+      }}</span>
+    </div>
+    <h1>{{ incident.title }}</h1>
+  </header>
+
+  <div class="layout">
+    <div class="main">
+      @if (incident.description) {
+        <section class="card section">
+          <h2>Description</h2>
+          <p class="description">{{ incident.description }}</p>
+        </section>
+      }
+
+      <section class="card section" aria-labelledby="timeline-heading">
+        <h2 id="timeline-heading">Timeline</h2>
+        <app-incident-timeline [entries]="store.timeline()" />
+
+        @if (canRespond()) {
+          <form class="note-form" [formGroup]="noteForm" (ngSubmit)="addNote()" novalidate>
+            <label for="note-text">Add a note</label>
+            <textarea
+              id="note-text"
+              formControlName="text"
+              rows="2"
+              placeholder="What did you find, or try?"
+              [attr.aria-invalid]="noteForm.controls.text.touched && noteForm.controls.text.invalid"
+            ></textarea>
+            @if (noteForm.controls.text.touched && noteForm.controls.text.invalid) {
+              <p class="field-error">Write something first (up to 4000 characters).</p>
+            }
+            <button type="submit" [disabled]="store.busy()">Add note</button>
+          </form>
+        }
+      </section>
+    </div>
+
+    <aside class="card section">
+      <dl class="facts">
+        <dt>Triggered</dt>
+        <dd>
+          <time [attr.datetime]="incident.createdAt">{{
+            incident.createdAt | date: 'MMM d, HH:mm:ss'
+          }}</time>
+        </dd>
+        <dt>Acknowledged</dt>
+        <dd>
+          @if (incident.acknowledgedAt) {
+            <time [attr.datetime]="incident.acknowledgedAt">{{
+              incident.acknowledgedAt | date: 'MMM d, HH:mm:ss'
+            }}</time>
+          } @else {
+            <span class="muted">—</span>
+          }
+        </dd>
+        <dt>Resolved</dt>
+        <dd>
+          @if (incident.resolvedAt) {
+            <time [attr.datetime]="incident.resolvedAt">{{
+              incident.resolvedAt | date: 'MMM d, HH:mm:ss'
+            }}</time>
+          } @else {
+            <span class="muted">—</span>
+          }
+        </dd>
+      </dl>
+
+      @if (showAcknowledge() || showResolve()) {
+        <div class="actions">
+          @if (showAcknowledge()) {
+            <button
+              type="button"
+              class="primary"
+              data-testid="acknowledge"
+              (click)="acknowledge()"
+              [disabled]="store.busy()"
+            >
+              Acknowledge
+            </button>
+          }
+          @if (showResolve()) {
+            <form [formGroup]="resolveForm" (ngSubmit)="resolve()" novalidate>
+              <label for="resolution-note"
+                >Resolution note <span class="optional">optional</span></label
+              >
+              <textarea
+                id="resolution-note"
+                formControlName="note"
+                rows="2"
+                placeholder="What fixed it?"
+              ></textarea>
+              @if (resolveForm.controls.note.invalid) {
+                <p class="field-error">Keep the note under 4000 characters.</p>
+              }
+              <button type="submit" data-testid="resolve" [disabled]="store.busy()">Resolve</button>
+            </form>
+          }
+        </div>
+      } @else if (incident.status === 'RESOLVED') {
+        <p class="muted closed">This incident is resolved.</p>
+      }
+    </aside>
+  </div>
+} @else if (store.loading()) {
+  <p class="muted">Loading incident…</p>
+}

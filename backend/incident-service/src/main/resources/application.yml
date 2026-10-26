@@ -21,9 +21,6 @@ spring:
   flyway:
     schemas: incident
     default-schema: incident
-  mvc:
-    problemdetails:
-      enabled: true
   security:
     oauth2:
       resourceserver:

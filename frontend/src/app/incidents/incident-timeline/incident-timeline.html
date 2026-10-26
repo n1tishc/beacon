@@ -1,0 +1,18 @@
+<ol>
+  @for (entry of entries(); track entry.id) {
+    <li class="entry entry-{{ entry.type.toLowerCase() }}" data-testid="timeline-entry">
+      <span class="dot" aria-hidden="true"></span>
+      <div class="body">
+        <p class="headline">
+          <strong>{{ entry.actor }}</strong> {{ verb(entry.type) }}
+          <time [attr.datetime]="entry.occurredAt">{{
+            entry.occurredAt | date: 'MMM d, HH:mm:ss'
+          }}</time>
+        </p>
+        @if (entry.note) {
+          <p class="note">{{ entry.note }}</p>
+        }
+      </div>
+    </li>
+  }
+</ol>

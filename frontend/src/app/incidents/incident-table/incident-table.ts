@@ -1,5 +1,6 @@
 import { DatePipe, LowerCasePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, input } from '@angular/core';
+import { RouterLink } from '@angular/router';
 
 import { Incident } from '../incident.model';
 
@@ -7,7 +8,7 @@ import { Incident } from '../incident.model';
 @Component({
   selector: 'app-incident-table',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DatePipe, LowerCasePipe],
+  imports: [DatePipe, LowerCasePipe, RouterLink],
   templateUrl: './incident-table.html',
   styleUrl: './incident-table.scss',
 })

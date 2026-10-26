@@ -7,18 +7,29 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
+/**
+ * The incident aggregate. Status only changes through {@link #acknowledge} and {@link #resolve},
+ * which enforce the {@link IncidentStatus} state machine and return the event that happened.
+ */
 @Entity
 @Table(name = "incidents")
 public class Incident {
 
+    /** Assigned here rather than by the database, so the Triggered event can carry it before the first save. */
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
+
+    /**
+     * Optimistic lock. Hibernate adds {@code WHERE version = ?} to every update and fails the
+     * transaction if another one changed the row first. A wrapper type, so that Spring Data treats
+     * {@code null} as "not persisted yet" and inserts instead of merging.
+     */
+    @Version
+    private Long version;
 
     @Column(nullable = false, length = 200)
     private String title;
@@ -40,11 +51,18 @@ public class Incident {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    @Column(name = "acknowledged_at")
+    private Instant acknowledgedAt;
+
+    @Column(name = "resolved_at")
+    private Instant resolvedAt;
+
     protected Incident() {
         // required by JPA
     }
 
     private Incident(String title, String description, Severity severity, Instant now) {
+        this.id = UUID.randomUUID();
         this.title = title;
         this.description = description;
         this.severity = severity;
@@ -58,8 +76,47 @@ public class Incident {
         return new Incident(title, description, severity, now);
     }
 
+    public IncidentEvent.Triggered triggeredBy(String actor) {
+        return new IncidentEvent.Triggered(id, actor, createdAt, severity);
+    }
+
+    public IncidentEvent.Acknowledged acknowledge(String actor, Instant now) {
+        moveTo(IncidentStatus.ACKNOWLEDGED, now);
+        acknowledgedAt = now;
+        return new IncidentEvent.Acknowledged(id, actor, now);
+    }
+
+    public IncidentEvent.Resolved resolve(String actor, String resolutionNote, Instant now) {
+        moveTo(IncidentStatus.RESOLVED, now);
+        resolvedAt = now;
+        return new IncidentEvent.Resolved(id, actor, now, resolutionNote);
+    }
+
+    /**
+     * Rejects a command that was based on an outdated copy of this incident. The client sends the
+     * version it last saw; this is checked before the state machine, so a stale client is always told
+     * to reload rather than given a confusing transition error.
+     */
+    public void requireVersion(long expectedVersion) {
+        if (version == null || version != expectedVersion) {
+            throw new StaleIncidentException(id, expectedVersion, version == null ? 0 : version);
+        }
+    }
+
+    private void moveTo(IncidentStatus next, Instant now) {
+        if (!status.canTransitionTo(next)) {
+            throw new IllegalTransitionException(id, status, next);
+        }
+        status = next;
+        updatedAt = now;
+    }
+
     public UUID getId() {
         return id;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 
     public String getTitle() {
@@ -84,5 +141,13 @@ public class Incident {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    public Instant getAcknowledgedAt() {
+        return acknowledgedAt;
+    }
+
+    public Instant getResolvedAt() {
+        return resolvedAt;
     }
 }
