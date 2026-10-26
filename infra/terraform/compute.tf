@@ -141,15 +141,12 @@ data "aws_iam_policy_document" "app" {
 
   # Without ListBucket, S3 answers 403 instead of 404 for a key that does not exist yet, and the
   # service could not tell "not uploaded yet" from "access denied".
+  # No s3:prefix condition: that check is not a list request and carries no prefix, so a conditional
+  # grant would not count. The bucket holds nothing but incidents/ anyway.
   statement {
     sid       = "AttachmentsNotFound"
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.attachments.arn]
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["incidents/*"]
-    }
   }
 
   statement {

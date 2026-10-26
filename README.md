@@ -352,7 +352,7 @@ flowchart LR
 
 ### Set it up
 
-You need an AWS account, administrator credentials for it in your shell, and `terraform`, `gh` (with admin rights on the repository), `jq` and JDK 21.
+You need an AWS account, administrator credentials for it in your shell, and `terraform`, `gh` (with admin rights on the repository), `jq` and JDK 21. The deploy job, the manual run below and the `production` environment all work from `main` only, so this branch has to be merged first.
 
 ```bash
 BUDGET_ALERT_EMAIL=you@example.com scripts/aws-up.sh   # shows the plan and asks first
@@ -389,7 +389,7 @@ Rolling back means deploying an older SHA: `start.sh` takes any tag that is stil
 - **Only CloudFront can reach the instance.** Its security group admits port 8080 from the `com.amazonaws.global.cloudfront.origin-facing` prefix list only, and the gateway trusts exactly one `X-Forwarded-For` hop. A client can't connect directly and spoof its address past the login rate limit. RDS admits only the instance's security group, from subnets with no route out.
 - **Tradeoff: CloudFront reaches the instance over plain HTTP.** Without a domain of our own, the instance has no certificate CloudFront would accept. Browsers always use HTTPS, but the CloudFront-to-EC2 hop is not encrypted. With a domain, the fix is an ACM certificate on the origin, or an ALB, which is not free.
 - **Least-privilege roles, split by who changes what.**
-  - The instance role can consume the one queue, read and write `incidents/*` in the attachment bucket, read `/beacon/app/*` and pull Beacon's images. `ListBucket` is limited to `incidents/`. Without it, S3 answers 403 instead of 404 for an upload that hasn't arrived, and "not uploaded yet" would look like "access denied".
+  - The instance role can consume the one queue, read and write `incidents/*` in the attachment bucket, read `/beacon/app/*` and pull Beacon's images. `ListBucket` is needed too: without it, S3 answers 403 instead of 404 for an upload that hasn't arrived, and "not uploaded yet" would look like "access denied".
   - The deploy role can ship a release: push images, sync the web bucket, invalidate the distribution, update the Lambda's code, run commands on this one instance and read two parameters. It can't change infrastructure; `terraform apply` is run by a person with `aws-up.sh`. Infrastructure changes are rare here, and a CI role that can create IAM roles is effectively an admin role.
   - `terraform test` enforces both scopes (see [Tests](#tests)).
 - **Secrets live in SSM Parameter Store as SecureString**, with the AWS-managed key, so there is nothing extra to pay for. Terraform generates them: the database password, the JWT signing key (stable, so deploys don't log anyone out), the service token and the ingest key. That puts them in the Terraform state too, which is why the state is in a private, encrypted, versioned bucket with S3-native locking, and not on a laptop.
@@ -465,7 +465,7 @@ Postmortems run against a real Postgres and LocalStack S3 with signature checks 
 
 `PostmortemSecurityTest` adds the role checks with real tokens (viewers read but can't write or upload), and a simulated AWS SDK failure mapped to `503`.
 
-The Terraform has its own tests (`infra/terraform/tests/`), run by `terraform test` against a mocked AWS provider, so they need no account. They pin the decisions this README makes: only CloudFront's prefix list reaches the instance; RDS is private; IMDSv2 is required with a hop limit of 2; CPU credits are standard; disks are encrypted; both buckets block public access; CORS allows only the app's origin; `/api/*` is HTTPS-only and uncached, with no custom error pages. They also check that neither IAM role uses wildcard actions, that `Resource: "*"` appears only for actions that can't be scoped, and that only this repository's `production` environment can assume the deploy role. Breaking one of those settings fails the tests (checked by doing it).
+The Terraform has its own tests (`infra/terraform/tests/`), run by `terraform test` against a mocked AWS provider, so they need no account. They pin the decisions this README makes: only CloudFront's prefix list reaches the instance; RDS is private; IMDSv2 is required with a hop limit of 2; CPU credits are standard; disks are encrypted; both buckets block public access; CORS allows only the app's origin; `/api/*` is HTTPS-only and uncached, with no custom error pages. They also check that neither IAM role uses wildcard actions, that `Resource: "*"` appears only for actions that can't be scoped, and that only this repository's `production` environment can assume the deploy role. Two of them were checked by breaking them on purpose (IMDSv2 set to optional, and `ssm:*` on the deploy role), and both failed as they should.
 
 CI (`.github/workflows/ci.yml`) runs four parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
