@@ -1,0 +1,140 @@
+<a [routerLink]="['/incidents', id()]" class="back">← Back to the incident</a>
+
+@if (store.error(); as error) {
+  <div class="alert" role="alert">{{ error }}</div>
+}
+
+@if (store.incident(); as incident) {
+  <header class="page-header">
+    <p class="eyebrow">Postmortem</p>
+    <h1>{{ incident.title }}</h1>
+    @if (store.postmortem(); as postmortem) {
+      <p class="muted saved" data-testid="last-saved">
+        Last saved by {{ postmortem.updatedBy }} on
+        <time [attr.datetime]="postmortem.updatedAt">{{
+          postmortem.updatedAt | date: 'MMM d, HH:mm'
+        }}</time>
+      </p>
+    }
+  </header>
+
+  @if (!resolved()) {
+    <p class="card section muted" data-testid="not-resolved">
+      The postmortem opens once the incident is resolved.
+    </p>
+  } @else {
+    <div class="layout">
+      <section class="card section" aria-label="Postmortem">
+        @if (canEdit()) {
+          @if (store.notice(); as notice) {
+            <div class="notice" role="status" data-testid="notice">
+              <p>{{ notice }}</p>
+              <button type="button" data-testid="discard" (click)="discardDraft()">
+                Discard mine, show theirs
+              </button>
+            </div>
+          }
+          <form [formGroup]="form" (ngSubmit)="save()" novalidate>
+            @for (section of sections; track section.key) {
+              <div class="field">
+                <label [for]="section.key">
+                  {{ section.label }}
+                  @if (section.key !== 'summary') {
+                    <span class="optional">optional</span>
+                  }
+                </label>
+                <p class="hint" [id]="section.key + '-hint'">{{ section.hint }}</p>
+                <textarea
+                  [id]="section.key"
+                  [formControlName]="section.key"
+                  [rows]="section.key === 'summary' ? 3 : 5"
+                  [attr.aria-describedby]="section.key + '-hint'"
+                  [attr.aria-invalid]="invalid(section.key)"
+                ></textarea>
+                @if (invalid(section.key)) {
+                  <p class="field-error">
+                    @if (section.key === 'summary') {
+                      Write a summary (up to 4000 characters).
+                    } @else {
+                      Keep this under 4000 characters.
+                    }
+                  </p>
+                }
+              </div>
+            }
+            <div class="form-actions">
+              <button type="submit" class="primary" data-testid="save" [disabled]="store.saving()">
+                {{ store.postmortem() ? 'Save changes' : 'Save postmortem' }}
+              </button>
+              @if (form.dirty && !store.saving()) {
+                <span class="muted unsaved">Unsaved changes</span>
+              }
+            </div>
+          </form>
+        } @else if (store.postmortem(); as postmortem) {
+          <dl class="read-only">
+            @for (section of sections; track section.key) {
+              @if (postmortem[section.key]; as text) {
+                <dt>{{ section.label }}</dt>
+                <dd>{{ text }}</dd>
+              }
+            }
+          </dl>
+        } @else {
+          <p class="muted" data-testid="no-postmortem">Nobody has written the postmortem yet.</p>
+        }
+      </section>
+
+      <aside class="card section" aria-labelledby="attachments-heading">
+        <h2 id="attachments-heading">Attachments</h2>
+        @if (store.attachments().length) {
+          <ul class="attachments" data-testid="attachments">
+            @for (attachment of store.attachments(); track attachment.id) {
+              <li>
+                <button
+                  type="button"
+                  class="link"
+                  [attr.aria-label]="'Download ' + attachment.fileName"
+                  (click)="download(attachment)"
+                >
+                  {{ attachment.fileName }}
+                </button>
+                <span class="muted meta"
+                  >{{ formatBytes(attachment.sizeBytes) }} · {{ attachment.uploadedBy }}</span
+                >
+              </li>
+            }
+          </ul>
+        } @else {
+          <p class="muted">No files yet.</p>
+        }
+
+        @if (store.attachmentError(); as error) {
+          <p class="field-error" role="alert" data-testid="attachment-error">{{ error }}</p>
+        }
+
+        @if (canEdit()) {
+          <div class="upload">
+            @if (store.uploading(); as fileName) {
+              <p class="muted" role="status" data-testid="uploading">Uploading {{ fileName }}…</p>
+            } @else {
+              <label class="file-button">
+                Attach a file
+                <input
+                  #file
+                  type="file"
+                  data-testid="file-input"
+                  [accept]="accept"
+                  (change)="upload(file)"
+                />
+              </label>
+              <p class="hint">Screenshots, graphs, logs or PDFs, up to 10 MB.</p>
+            }
+          </div>
+        }
+      </aside>
+    </div>
+  }
+} @else if (store.loading()) {
+  <p class="muted">Loading postmortem…</p>
+}

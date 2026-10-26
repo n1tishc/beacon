@@ -54,6 +54,11 @@
             <groupId>io.awspring.cloud</groupId>
             <artifactId>spring-cloud-aws-starter-sqs</artifactId>
         </dependency>
+        <!-- Postmortem attachments: presigned upload/download URLs, so file bytes never pass through this service. -->
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-s3</artifactId>
+        </dependency>
 
         <!-- WebClient for calling notification-service; the service itself stays on servlet + virtual threads. -->
         <dependency>

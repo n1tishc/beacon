@@ -16,9 +16,17 @@ import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
+import software.amazon.awssdk.core.exception.SdkException;
+
+import dev.beacon.incident.domain.AttachmentNotFoundException;
+import dev.beacon.incident.domain.AttachmentRejectedException;
 import dev.beacon.incident.domain.IllegalTransitionException;
 import dev.beacon.incident.domain.IncidentNotFoundException;
+import dev.beacon.incident.domain.IncidentNotResolvedException;
+import dev.beacon.incident.domain.PostmortemNotFoundException;
 import dev.beacon.incident.domain.StaleIncidentException;
+import dev.beacon.incident.domain.StalePostmortemException;
+import dev.beacon.incident.domain.UploadNotFinishedException;
 
 /**
  * Turns every error the API can produce into an RFC 7807 problem response.
@@ -35,6 +43,7 @@ import dev.beacon.incident.domain.StaleIncidentException;
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     static final String INCIDENT_CHANGED = "Incident changed";
+    static final String POSTMORTEM_CHANGED = "Postmortem changed";
 
     /** One invalid field, by its JSON name, so a client can show the message next to that field. */
     public record InvalidField(String field, String message) {
@@ -60,6 +69,45 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(IllegalTransitionException.class)
     ProblemDetail illegalTransition(IllegalTransitionException exception) {
         return problem(HttpStatus.CONFLICT, "Transition not allowed", exception.getMessage());
+    }
+
+    /** The client reads this as "no postmortem yet" and offers to write one. */
+    @ExceptionHandler(PostmortemNotFoundException.class)
+    ProblemDetail postmortemNotFound(PostmortemNotFoundException exception) {
+        return problem(HttpStatus.NOT_FOUND, "Postmortem not found", exception.getMessage());
+    }
+
+    @ExceptionHandler(StalePostmortemException.class)
+    ProblemDetail stalePostmortem(StalePostmortemException exception) {
+        return problem(HttpStatus.CONFLICT, POSTMORTEM_CHANGED, exception.getMessage());
+    }
+
+    @ExceptionHandler(IncidentNotResolvedException.class)
+    ProblemDetail incidentNotResolved(IncidentNotResolvedException exception) {
+        return problem(HttpStatus.CONFLICT, "Incident not resolved", exception.getMessage());
+    }
+
+    @ExceptionHandler(AttachmentNotFoundException.class)
+    ProblemDetail attachmentNotFound(AttachmentNotFoundException exception) {
+        return problem(HttpStatus.NOT_FOUND, "Attachment not found", exception.getMessage());
+    }
+
+    @ExceptionHandler(AttachmentRejectedException.class)
+    ProblemDetail attachmentRejected(AttachmentRejectedException exception) {
+        return problem(HttpStatus.BAD_REQUEST, "Attachment not allowed", exception.getMessage());
+    }
+
+    @ExceptionHandler(UploadNotFinishedException.class)
+    ProblemDetail uploadNotFinished(UploadNotFinishedException exception) {
+        return problem(HttpStatus.CONFLICT, "Upload not finished", exception.getMessage());
+    }
+
+    /** S3 is unreachable or refused a call. Incidents and postmortem text still work; only files do not. */
+    @ExceptionHandler(SdkException.class)
+    ProblemDetail storageUnavailable(SdkException exception) {
+        logger.warn("File storage call failed", exception);
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "File storage unavailable",
+                "Attachments are unavailable right now. Try again in a moment.");
     }
 
     /** A {@code @Valid @RequestBody} failed Bean Validation. */

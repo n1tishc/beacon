@@ -132,6 +132,13 @@ public class Incident {
         }
     }
 
+    /** Postmortems and their attachments are only for incidents that are over. */
+    public void requireResolved() {
+        if (status != IncidentStatus.RESOLVED) {
+            throw new IncidentNotResolvedException(id, status);
+        }
+    }
+
     private void moveTo(IncidentStatus next, Instant now) {
         if (!status.canTransitionTo(next)) {
             throw new IllegalTransitionException(id, status, next);

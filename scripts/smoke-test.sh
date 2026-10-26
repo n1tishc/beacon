@@ -176,4 +176,38 @@ echo "12. A repeat of the same alert folds into that incident instead of opening
 SECOND_ID=$(wait_for_alert_count 2) || fail "repeat alert was not counted against the open incident"
 [[ "$FIRST_ID" == "$SECOND_ID" ]] || fail "repeat alert opened a different incident"
 
+POSTMORTEM_URL="$BASE_URL/api/incidents/$INCIDENT_ID/postmortem"
+
+echo "13. A responder writes the resolved incident's postmortem; a viewer can read it but not edit it"
+[[ $(status_of -X PUT "$POSTMORTEM_URL" -H "Authorization: Bearer $VIEWER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"summary": "Viewer edit"}') == 403 ]] \
+  || fail "a viewer could write the postmortem"
+curl -fsS -X PUT "$POSTMORTEM_URL" -H "Authorization: Bearer $RESPONDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"summary": "Smoke test postmortem", "rootCause": "None, this is a test"}' \
+  | jq -e '.version == 0 and .createdBy == "responder"' >/dev/null || fail "the responder could not write the postmortem"
+curl -fsS "$POSTMORTEM_URL" -H "Authorization: Bearer $VIEWER_TOKEN" \
+  | jq -e '.summary == "Smoke test postmortem"' >/dev/null || fail "the viewer could not read the postmortem"
+
+echo "14. An attachment goes straight to S3 with a presigned URL, is checked, and downloads intact"
+ATTACHMENT_FILE=$(mktemp)
+trap 'rm -f "$BODY_FILE" "$ATTACHMENT_FILE"' EXIT
+printf '%s\n' "12:01 checkout-api OOMKilled" "12:02 rollback started" >"$ATTACHMENT_FILE"
+SIZE=$(wc -c <"$ATTACHMENT_FILE" | tr -d ' ')
+TICKET=$(curl -fsS -X POST "$POSTMORTEM_URL/attachments" -H "Authorization: Bearer $RESPONDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"fileName\": \"smoke.log\", \"contentType\": \"text/plain\", \"sizeBytes\": $SIZE}")
+UPLOAD_URL=$(jq -er .uploadUrl <<<"$TICKET")
+ATTACHMENT_ID=$(jq -er .attachment.id <<<"$TICKET")
+# The URL is signed for this type and size only: S3 itself refuses anything else.
+[[ $(status_of -X PUT "$UPLOAD_URL" -H 'Content-Type: text/html' --data-binary @"$ATTACHMENT_FILE") == 403 ]] \
+  || fail "the upload URL accepted a different content type"
+[[ $(status_of -X PUT "$UPLOAD_URL" -H 'Content-Type: text/plain' --data-binary @"$ATTACHMENT_FILE") == 200 ]] \
+  || fail "the upload to S3 failed"
+curl -fsS -X POST "$POSTMORTEM_URL/attachments/$ATTACHMENT_ID/complete" -H "Authorization: Bearer $RESPONDER_TOKEN" \
+  | jq -e '.status == "UPLOADED"' >/dev/null || fail "the upload was not confirmed"
+DOWNLOAD_URL=$(curl -fsS "$POSTMORTEM_URL/attachments/$ATTACHMENT_ID/download" \
+  -H "Authorization: Bearer $VIEWER_TOKEN" | jq -er .url)
+curl -fsS "$DOWNLOAD_URL" | cmp -s - "$ATTACHMENT_FILE" || fail "the downloaded file differs from the upload"
+
 echo "Smoke test passed against $BASE_URL"

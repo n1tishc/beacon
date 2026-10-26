@@ -2,7 +2,7 @@
 # Every value has a working local default; copy .env.example to .env to override.
 #
 # Only `web` (the UI) and `gateway` (the API) are published to the host, plus LocalStack (the
-# alert endpoint) and fake-slack, both on 127.0.0.1 only. The services behind the gateway are
+# alert endpoint, and S3 for attachment uploads) and fake-slack, both on 127.0.0.1 only. The services behind the gateway are
 # reachable only on the compose network, as they would be in production.
 name: beacon
 
@@ -64,6 +64,12 @@ services:
     environment:
       INGEST_API_KEY: ${INGEST_API_KEY:-local-ingest-key}
       AWS_DEFAULT_REGION: us-east-1
+      ATTACHMENTS_BUCKET: ${ATTACHMENTS_BUCKET:-beacon-attachments}
+      # The bucket's CORS rule lets only the web app's origin upload from a browser.
+      WEB_ORIGIN: http://localhost:${WEB_PORT:-4200}
+      # Check presigned-URL signatures as AWS does (LocalStack skips this by default), so a URL
+      # signed for one file type or size is refused for another, locally too.
+      S3_SKIP_SIGNATURE_VALIDATION: "0"
       # Lambda containers join the compose network so they can reach LocalStack's SQS.
       LAMBDA_DOCKER_NETWORK: beacon_default
     ports:
@@ -95,6 +101,12 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       NOTIFICATION_SERVICE_URL: http://notification-service:8083
       NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:-local-service-token}
+      # Postmortem attachments, also in LocalStack. The service checks uploads over the compose
+      # network, but signs URLs for the host the browser uses: the host is part of the signature.
+      SPRING_CLOUD_AWS_S3_ENDPOINT: http://localstack:4566
+      S3_PUBLIC_ENDPOINT: http://localhost:${LOCALSTACK_PORT:-4566}
+      S3_PATH_STYLE_ACCESS: "true"
+      ATTACHMENTS_BUCKET: ${ATTACHMENTS_BUCKET:-beacon-attachments}
     # Deliberately no depends_on notification-service: incidents must work while it is down.
     depends_on:
       postgres:
