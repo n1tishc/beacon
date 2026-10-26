@@ -114,7 +114,10 @@ sequenceDiagram
 - **Concurrent alerts for one problem open exactly one incident.** A partial unique index allows one open incident per fingerprint. When two alerts race, one insert fails; the listener retries once in a fresh transaction, sees the winner's incident and folds into it.
 - **Repeats don't make anyone's copy stale.** The alert count is bumped with a single `UPDATE … SET alert_count = alert_count + 1`, which does not touch the `@Version` column. A noisy alert never turns a responder's acknowledge into a 409.
 - **Failures go to the dead-letter queue.** A message is deleted only once it has been processed. An unreadable message, or one that keeps failing (say, the database is down), is retried by SQS and, after three receives, parked in `beacon-alerts-dlq` for inspection.
-- **Alert-to-incident latency is measured, not guessed.** The Lambda stamps each alert with API Gateway's receive time. After the transaction commits, incident-service records the time since then in the `beacon.alerts.latency` timer, with p50/p95/p99 and a tag for the outcome. Read it at `/actuator/metrics/beacon.alerts.latency`.
+- **Alert-to-incident latency is measured, not guessed.** The Lambda stamps each alert with API Gateway's receive time. After the transaction commits, incident-service records the time since then in the `beacon.alerts.latency` timer, tagged by outcome.
+  - Count and total time are at `/actuator/metrics/beacon.alerts.latency`.
+  - p50/p95/p99 are a separate gauge: `/actuator/metrics/beacon.alerts.latency.percentile?tag=phi:0.95`. It covers a sliding window of about two minutes, so read it while alerts are flowing.
+  - Both need a bearer token for any role. The gateway doesn't route `/actuator`, so query the service directly, e.g. `docker compose exec incident-service curl -H "Authorization: Bearer $TOKEN" localhost:8081/actuator/metrics/...`.
 - **The dashboard is live.** It polls every 5 seconds while the tab is visible and refreshes as soon as you come back to it. Polling was chosen over WebSockets or SSE because it needs nothing new in the gateway, nginx or CloudFront, and a few seconds of delay is fine for this use. A slow response is never stacked on (`exhaustMap`), and a poll that started before you created an incident can't hide it again.
 
 ## Quick start
