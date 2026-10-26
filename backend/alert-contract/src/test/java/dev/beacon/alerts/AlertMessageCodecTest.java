@@ -7,6 +7,8 @@ import java.time.Instant;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AlertMessageCodecTest {
 
@@ -43,6 +45,24 @@ class AlertMessageCodecTest {
                 .isInstanceOf(AlertMessageCodec.InvalidAlertMessageException.class)
                 .hasMessageContaining("missing required fields");
         assertThatThrownBy(() -> AlertMessageCodec.fromJson(AlertMessageCodec.toJson(MESSAGE).replace("HIGH", "APOCALYPTIC")))
+                .isInstanceOf(AlertMessageCodec.InvalidAlertMessageException.class);
+    }
+
+    /** Only the description may be missing; every other field is required on its own. */
+    @ParameterizedTest
+    @ValueSource(strings = {"alertId", "source", "fingerprint", "title", "severity", "receivedAt"})
+    void rejectsAMessageWithoutARequiredField(String field) {
+        String json = AlertMessageCodec.toJson(MESSAGE).replaceFirst("\"" + field + "\":(\"[^\"]*\")", "\"" + field + "\":null");
+
+        assertThat(json).contains("\"" + field + "\":null");
+        assertThatThrownBy(() -> AlertMessageCodec.fromJson(json))
+                .isInstanceOf(AlertMessageCodec.InvalidAlertMessageException.class)
+                .hasMessageContaining("missing required fields");
+    }
+
+    @Test
+    void rejectsAJsonNull() {
+        assertThatThrownBy(() -> AlertMessageCodec.fromJson("null"))
                 .isInstanceOf(AlertMessageCodec.InvalidAlertMessageException.class);
     }
 }

@@ -32,6 +32,9 @@
         <java.version>21</java.version>
         <spring-cloud.version>2025.0.3</spring-cloud.version>
         <jacoco.version>0.8.15</jacoco.version>
+        <!-- The coverage gate, per module. Override on the command line to try it: -Dcoverage.branch.minimum=0.95 -->
+        <coverage.line.minimum>0.85</coverage.line.minimum>
+        <coverage.branch.minimum>0.70</coverage.branch.minimum>
         <wiremock.version>3.13.2</wiremock.version>
         <!-- 3.4.x is the Spring Cloud AWS line for Spring Boot 3.5; its BOM also pins the AWS SDK v2. -->
         <spring-cloud-aws.version>3.4.2</spring-cloud-aws.version>
@@ -150,7 +153,8 @@
                 </executions>
             </plugin>
 
-            <!-- Coverage report for every module (target/site/jacoco). The coverage gate is added in the hardening slice. -->
+            <!-- Coverage report for every module (target/site/jacoco), and a gate that fails `verify`
+                 when a module drops below it. One rule for every module, set a little under where they all are. -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
@@ -167,6 +171,32 @@
                         <goals>
                             <goal>report</goal>
                         </goals>
+                    </execution>
+                    <execution>
+                        <id>coverage-gate</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${coverage.line.minimum}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${coverage.branch.minimum}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

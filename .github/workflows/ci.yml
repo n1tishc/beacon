@@ -96,7 +96,7 @@ jobs:
       - run: terraform test
 
   stack:
-    name: Docker Compose · build & smoke test
+    name: Docker Compose · smoke & E2E tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -111,6 +111,29 @@ jobs:
       # (LocalStack) -> incident-service.
       - name: Smoke test through the web proxy
         run: scripts/smoke-test.sh http://localhost:4200
+      # The same journey in a real browser: login, an alert appearing on the live dashboard,
+      # acknowledge, resolve, postmortem and a browser upload straight to S3. Runs after the smoke
+      # test, so the alert Lambda is already warm.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: E2E tests (Playwright, Chromium)
+        working-directory: e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          if-no-files-found: ignore
       # Slack goes away: incidents and alerts must keep working, Slack deliveries fail and its
       # circuit breaker opens, visible through the API.
       - name: Smoke test with Slack down

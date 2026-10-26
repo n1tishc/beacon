@@ -17,9 +17,11 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 5 | Notifications: notification-service, Slack + mock sink, Resilience4j circuit breaker | ✅ Shipped |
 | 6 | Postmortems: editor, S3 presigned uploads | ✅ Shipped |
 | 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | 🟡 Built and validated offline; first live deploy pending an AWS account |
-| 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | Planned |
+| 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | ✅ Shipped |
 
-## Architecture (current slice)
+Still to come: load-test numbers (`METRICS.md`, measured with k6 against the AWS deployment). They wait for the first live deploy, because a number that wasn't measured doesn't go in.
+
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -282,6 +284,8 @@ To post to a real workspace, put its incoming-webhook URL in `.env` as `SLACK_WE
 
 Resolve an incident and its page links to the postmortem. Attachments go to LocalStack's S3, in the `beacon-attachments` bucket; list them with `docker compose exec localstack awslocal s3 ls s3://beacon-attachments --recursive`. Open the app at `http://localhost:4200`, not `127.0.0.1`, because the bucket's CORS rule names that origin.
 
+To fill a fresh stack with realistic data (incidents in every state, notes, repeated alerts, a written postmortem), run `scripts/seed.sh`. It goes through the API and the alert endpoint, so every incident has a real timeline. It needs `jq`, and refuses to run twice unless `FORCE=1`.
+
 `scripts/smoke-test.sh` runs the same kind of checks against any running stack (it needs `jq`). CI runs it too.
 
 Stop with `docker compose down`. Add `-v` to also delete the database volume.
@@ -414,9 +418,35 @@ Rolling back means deploying an older SHA: `start.sh` takes any tag that is stil
 ```bash
 cd backend && ./mvnw verify       # JUnit 5, Mockito, MockMvc, WireMock, Testcontainers (needs Docker)
 cd frontend && npm run test:ci    # Vitest (jsdom), headless, single run
+cd e2e && npm ci && npx playwright install chromium && npx playwright test   # against a running stack
 ```
 
 Each module writes a JaCoCo HTML report to `backend/<module>/target/site/jacoco/index.html`.
+
+**The coverage gate.** `verify` fails if any module drops below 85% of lines or 70% of branches covered (JaCoCo `check`, one rule for every module, set in `backend/pom.xml`). Coverage in the run that introduced the gate, 194 tests:
+
+| Module | Lines | Branches |
+|--------|-------|----------|
+| incident-service | 97.2% (596/613) | 88.0% (66/75) |
+| notification-service | 96.6% (201/208) | 77.5% (31/40) |
+| auth-service | 94.4% (236/250) | 71.4% (20/28) |
+| gateway | 92.2% (59/64) | 83.3% (5/6) |
+| alert-contract | 91.7% (22/24) | 100% (14/14) |
+| alert-ingest-lambda | 90.0% (90/100) | 88.3% (53/60) |
+| security-common | 100% (17/17) | no branches |
+
+auth-service sets the branch floor. alert-contract was at 57% until this slice added a test for each required field of the SQS message. To see the gate fail, run `./mvnw verify -Dcoverage.branch.minimum=0.95`: it stops at `Rule violated for bundle alert-ingest-lambda: branches covered ratio is 0.88, but expected minimum is 0.95`.
+
+**End-to-end tests (Playwright, `e2e/`).** They run in a real Chromium against a running stack. They never start one. The main test is the on-call journey:
+1. sign in as a responder through the login form
+2. send an alert to the ingest endpoint, and wait for it to appear on the dashboard that is already open, with no reload: that is the live refresh, tested in a browser
+3. open it, acknowledge, resolve with a note, and check the timeline
+4. write the postmortem, then attach a file. The browser PUTs it straight to S3 with the presigned URL, CORS preflight included, which is the one path the curl smoke test can't cover.
+5. reload and check that the summary and the attachment are still there
+
+Two smaller tests cover a wrong password, and a viewer who can read an incident but sees no controls to change it. The suite reads the same variables as the smoke test (`E2E_BASE_URL`, `INGEST_URL`, `INGEST_API_KEY`, `DEMO_USER_PASSWORD`), so it can point at the AWS deployment too. Run it against `http://localhost:4200`, not `127.0.0.1`: from any other origin, S3's CORS rule refuses the upload, and the attachment step fails. That was checked on purpose, and it fails exactly there.
+
+To run it on LambdaTest's cloud browsers instead, set `LT_USERNAME` and `LT_ACCESS_KEY` (`e2e/lambdatest.ts`). A cloud browser reaches a public URL like the AWS deployment directly; for the local stack, start the LambdaTest tunnel and set `LT_TUNNEL=true`. This path follows LambdaTest's documented capability format, but it has not been run against a LambdaTest account yet.
 
 The security tests use **real signed tokens**. `security-common` publishes a `TestTokens` helper as a test-jar. It mints RS256 tokens exactly as auth-service does, and WireMock serves its public key as a JWKS. The gateway and incident-service then validate those tokens through their production decoder and role mapping, with nothing mocked. Among the cases covered:
 - missing, expired and wrong-issuer tokens
@@ -471,9 +501,13 @@ CI (`.github/workflows/ci.yml`) runs four parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
 - the Angular tests and production build
 - `terraform fmt -check`, `validate` (both configurations) and `terraform test`
-- `docker compose up --build`, followed by `scripts/smoke-test.sh` through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. It sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Finally it writes the resolved incident's postmortem (a viewer gets 403) and attaches a file: a PUT with the wrong type is refused by S3, the right one is accepted, confirmed, and downloads byte for byte. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
+- `docker compose up --build`, followed by `scripts/smoke-test.sh` and the Playwright suite through the nginx proxy. The smoke test logs in as each role and checks the 401, 403 and 201 responses across all services. It then walks one incident through acknowledge and resolve, including a stale-version 409, and checks the timeline. It checks that every step notified the mock sink and Slack, and that `/internal/**` can't be reached from outside. It sends alerts through API Gateway → Lambda → SQS: a wrong key is rejected, an alert becomes an incident, and a repeat folds into it. Finally it writes the resolved incident's postmortem (a viewer gets 403) and attaches a file: a PUT with the wrong type is refused by S3, the right one is accepted, confirmed, and downloads byte for byte. Then CI stops `fake-slack` and runs the smoke test again with `EXPECT_SLACK=down`: incidents and alerts still work, Slack deliveries are FAILED or SKIPPED, and the circuit is OPEN.
+
+After the first smoke test, the same job runs the Playwright suite against the stack, while the alert Lambda is warm, and uploads the report and traces if it fails.
 
 On `main`, a fifth job deploys to AWS once those four pass, then runs the same smoke test against the live URL (see [Deploying to AWS](#deploying-to-aws)). It is skipped until the AWS infrastructure exists, so pull requests and forks never need AWS.
+
+The `Jenkinsfile` runs the same checks for teams on Jenkins: the backend, frontend and Terraform stages in parallel, then the stack, the smoke test, Playwright, and the smoke test with Slack down. It publishes JUnit results and archives the coverage and Playwright reports, and it always tears the stack down. It doesn't deploy: GitHub Actions holds the AWS role and the `production` environment, so there is one way to ship. Agents need Docker with Compose, JDK 21, curl and jq; Node, Terraform and Playwright run in containers (Docker Pipeline plugin). It passes Jenkins' declarative validator (`/pipeline-model-converter/validate`, on a throwaway Jenkins LTS), which checks structure and options but not that each command succeeds. It hasn't been run end to end on a Jenkins agent.
 
 ## API
 
@@ -544,14 +578,15 @@ infra/fake-slack/       WireMock mapping that answers like a Slack incoming webh
 infra/terraform/        The AWS deployment (one file per concern), its tests, and bootstrap/ for the state bucket
 deploy/                 What runs on the EC2 instance: the production compose file and start.sh
 scripts/smoke-test.sh   End-to-end checks against a running stack, local or deployed
+scripts/seed.sh         Demo data through the public API: every state, notes, repeated alerts, a postmortem
 scripts/aws-up.sh       Create/update the AWS deployment and connect GitHub Actions to it
 scripts/aws-destroy.sh  Delete all of it
 scripts/deploy-to-instance.sh  Ship a release to the instance through SSM Run Command
+e2e/                    Playwright browser tests, run against a running stack (locally, in CI, or on LambdaTest)
 docker-compose.yml      The whole local stack
 .github/workflows/      CI and the deploy job
+Jenkinsfile             The same checks as CI, for Jenkins (no deploy)
 ```
-
-Slice 8 adds `e2e/` (Playwright) and `load/` (k6).
 
 ## Configuration
 
@@ -584,7 +619,28 @@ Services read their configuration from environment variables. The `local` Spring
 
 No secrets are committed. In AWS, the secrets and per-environment values come from SSM Parameter Store (see [Deploying to AWS](#deploying-to-aws)), and GitHub holds no AWS keys at all.
 
-## Design notes (so far)
+## Design notes
+
+### Tradeoffs at a glance
+
+Every choice below is explained where it is made; this is the list in one place.
+
+| Decision | What it buys | What it costs, and the next step |
+|----------|--------------|----------------------------------|
+| Notifications after commit, best effort | An incident is saved even with Slack or notification-service down | A notification can be dropped (counted in `beacon.notifications.dropped`). Next: a transactional outbox |
+| Optimistic locking (`@Version`) on incidents and postmortems | No locks held while a person reads; a stale command gets a clear `409` | The client has to reload and retry |
+| Alerts through SQS, not the gateway | Bursts and incident-service outages just lengthen the queue; poison messages go to a DLQ | An alert becomes an incident asynchronously, not within the request that sent it |
+| Fingerprint dedup with a unique partial index | Repeats fold into the open incident, even under concurrent delivery | Racing deliveries retry once on the constraint |
+| Presigned S3 uploads | File bytes never touch a service thread or its memory | An extra confirm step, and a cleanup job for abandoned uploads |
+| One shared Postgres, a schema per service | One free-tier RDS instance; still no cross-service table access | One database to scale and to fail. Next: an instance per service |
+| In-memory rate limits in the gateway | No Redis to run | Limits are per gateway instance. Next: `RedisRateLimiter` |
+| Single-use refresh tokens with reuse detection | A stolen refresh token is caught on reuse | Two tabs refreshing at the same instant log the user out |
+| Polling dashboard (5 s, only while visible) instead of WebSockets | Works through every proxy and CloudFront with no sticky sessions | Up to 5 s of delay, and requests while idle |
+| Signals stores instead of NgRx | Far less boilerplate for an app this size | No devtools time travel; NgRx is the step up if state grows |
+| Four JVMs on one t3.micro with swap | Stays in the free tier | Slow cold starts and first requests. Next: a t3.small |
+| CloudFront → EC2 over HTTP | No domain or ALB needed | That hop is unencrypted. Next: a domain and an ACM certificate |
+| Terraform applied by a person, CI deploys only | The CI role can't change infrastructure | Infrastructure changes are a manual step |
+
 
 ### Security
 
