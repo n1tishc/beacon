@@ -1,0 +1,17 @@
+<header class="topbar">
+  <a class="brand" routerLink="/">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v3M4.2 6.2l2.1 2.1M19.8 6.2l-2.1 2.1" />
+      <path d="M8 21v-6a4 4 0 0 1 8 0v6" />
+      <path d="M5 21h14" />
+    </svg>
+    <span>Beacon</span>
+  </a>
+  <nav aria-label="Main">
+    <a routerLink="/incidents" routerLinkActive="active">Incidents</a>
+  </nav>
+</header>
+
+<main>
+  <router-outlet />
+</main>

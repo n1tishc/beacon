@@ -1,0 +1,25 @@
+# Build output
+target/
+dist/
+node_modules/
+.angular/
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Editors and OS
+.idea/
+*.iml
+.vscode/
+.DS_Store

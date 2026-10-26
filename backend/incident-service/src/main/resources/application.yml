@@ -1,0 +1,40 @@
+# Base configuration. Anything environment-specific comes from env vars;
+# the `local` profile supplies defaults for running on a laptop.
+spring:
+  application:
+    name: incident-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${PORT:8081}
+  shutdown: graceful
+  # Build Location headers and redirects from X-Forwarded-* set by the proxy in front of us.
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

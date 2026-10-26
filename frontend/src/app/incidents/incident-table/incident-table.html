@@ -1,0 +1,35 @@
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Severity</th>
+      <th scope="col">Incident</th>
+      <th scope="col">Status</th>
+      <th scope="col">Triggered</th>
+    </tr>
+  </thead>
+  <tbody>
+    @for (incident of incidents(); track incident.id) {
+      <tr data-testid="incident-row">
+        <td>
+          <span class="severity severity-{{ incident.severity | lowercase }}">{{
+            incident.severity
+          }}</span>
+        </td>
+        <td>
+          <div class="title">{{ incident.title }}</div>
+          @if (incident.description) {
+            <div class="description">{{ incident.description }}</div>
+          }
+        </td>
+        <td>
+          <span class="status status-{{ incident.status | lowercase }}">{{ incident.status }}</span>
+        </td>
+        <td class="time">
+          <time [attr.datetime]="incident.createdAt">{{
+            incident.createdAt | date: 'MMM d, HH:mm'
+          }}</time>
+        </td>
+      </tr>
+    }
+  </tbody>
+</table>

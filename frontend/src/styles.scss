@@ -1,0 +1,124 @@
+// Design tokens shared by every component. Components reference these variables, never raw colours.
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-hover: #f9fafb;
+  --border: #e3e6eb;
+  --text: #16191f;
+  --text-muted: #626a77;
+  --accent: #f59e0b;
+  --primary: #1f4fd8;
+  --primary-hover: #1a43b8;
+  --danger: #b42318;
+  --danger-bg: #fef3f2;
+  --radius: 6px;
+
+  --topbar: #12161d;
+  --topbar-text: #f3f4f6;
+  --topbar-muted: #9ca3af;
+
+  --sev-critical: #b42318;
+  --sev-critical-bg: #fee4e2;
+  --sev-high: #b54708;
+  --sev-high-bg: #fef0c7;
+  --sev-medium: #854d0e;
+  --sev-medium-bg: #fef9c3;
+  --sev-low: #475467;
+  --sev-low-bg: #eaecf0;
+
+  --status-triggered: #b42318;
+  --status-acknowledged: #b54708;
+  --status-resolved: #067647;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+textarea {
+  resize: vertical;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+button {
+  padding: 0.5rem 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

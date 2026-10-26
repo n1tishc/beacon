@@ -1,0 +1,31 @@
+<div class="page-header">
+  <div>
+    <h1>Incidents</h1>
+    <p class="subtitle">
+      {{ store.total() }} {{ store.total() === 1 ? 'incident' : 'incidents' }}, newest first
+    </p>
+  </div>
+  <button type="button" (click)="store.load()" [disabled]="store.loading()">
+    {{ store.loading() ? 'Refreshing…' : 'Refresh' }}
+  </button>
+</div>
+
+@if (store.error(); as error) {
+  <div class="alert" role="alert">{{ error }}</div>
+}
+
+<div class="layout">
+  <section class="card list-card" aria-label="Incident list">
+    @if (store.incidents().length > 0) {
+      <app-incident-table [incidents]="store.incidents()" />
+    } @else if (store.loading()) {
+      <p class="empty">Loading incidents…</p>
+    } @else {
+      <p class="empty">No incidents yet. All quiet.</p>
+    }
+  </section>
+
+  <aside class="card">
+    <app-create-incident-form />
+  </aside>
+</div>

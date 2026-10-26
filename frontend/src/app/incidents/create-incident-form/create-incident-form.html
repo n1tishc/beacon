@@ -1,0 +1,43 @@
+<form [formGroup]="form" (ngSubmit)="submit()" aria-labelledby="create-incident-heading" novalidate>
+  <h2 id="create-incident-heading">Trigger an incident</h2>
+
+  <div class="field">
+    <label for="incident-title">Title</label>
+    <input
+      id="incident-title"
+      formControlName="title"
+      placeholder="Checkout API returning 502s"
+      autocomplete="off"
+      [attr.aria-invalid]="form.controls.title.touched && form.controls.title.invalid"
+    />
+    @if (form.controls.title.touched && form.controls.title.invalid) {
+      <p class="field-error">Give the incident a title (up to 200 characters).</p>
+    }
+  </div>
+
+  <div class="field">
+    <label for="incident-severity">Severity</label>
+    <select id="incident-severity" formControlName="severity">
+      @for (severity of severities; track severity) {
+        <option [value]="severity">{{ severity | titlecase }}</option>
+      }
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="incident-description">Description <span class="optional">optional</span></label>
+    <textarea
+      id="incident-description"
+      formControlName="description"
+      rows="4"
+      placeholder="What is affected, and since when?"
+    ></textarea>
+    @if (form.controls.description.invalid) {
+      <p class="field-error">Keep the description under 4000 characters.</p>
+    }
+  </div>
+
+  <button type="submit" class="primary" [disabled]="store.saving()">
+    {{ store.saving() ? 'Triggering…' : 'Trigger incident' }}
+  </button>
+</form>
