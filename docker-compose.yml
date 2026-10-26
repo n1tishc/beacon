@@ -119,8 +119,8 @@ services:
       <<: *database-env
       AUTH_JWKS_URI: http://auth-service:8082/.well-known/jwks.json
       NOTIFICATION_SERVICE_TOKEN: ${NOTIFICATION_SERVICE_TOKEN:-local-service-token}
-      # The fake Slack below unless .env points at a real workspace's webhook (a secret).
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-http://fake-slack:8080/services/T0000/B0000/local-fake-slack}
+      # Unset: the fake Slack below. Empty: Slack off (mock sink only). Or a real webhook (a secret).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL-http://fake-slack:8080/services/T0000/B0000/local-fake-slack}
       BEACON_PUBLIC_URL: http://localhost:${WEB_PORT:-4200}
     depends_on:
       postgres:

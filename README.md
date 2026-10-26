@@ -147,7 +147,7 @@ sequenceDiagram
 - **What notifies.** Triggered, acknowledged and resolved, whether a person or an alert caused it. Notes don't, and neither do repeat alerts folded into an open incident. Every change goes through one `IncidentEventRecorder`, which writes the timeline entry and publishes the event, so the API and the alert listener can't drift apart. Whether an event notifies is an exhaustive `switch` over the sealed `IncidentEvent`, so a new event type has to decide.
 - **After commit, off the request thread.** A `@TransactionalEventListener(AFTER_COMMIT)` plus `@Async` (on virtual threads) means:
   - a rolled-back change never notifies anyone (an alert that lost a race and is retried, say);
-  - neither the API response nor the SQS listener waits for notification-service, and nothing it does can fail them. A test points incident-service at a notification-service that hangs and shows that the API answers before the first attempt has even timed out.
+  - neither the API response nor the SQS listener waits for notification-service, and nothing it does can fail them. A test points incident-service at a notification-service that hangs: the API answers while that notification is still being retried in the background.
 - **The same three Resilience4j layers on both hops**, as Reactor operators so the order is visible in code. Innermost first:
   1. a **time limiter** per attempt (Slack 2 s; notification-service 10 s), so a timeout counts as a failure;
   2. a **circuit breaker** that counts every attempt. After 4 calls (Slack) or 5 (notification-service) with at least half failed, it opens, and calls fail at once without touching the remote side for 30 s. Then 2 trial calls decide whether it closes again;
@@ -158,7 +158,9 @@ sequenceDiagram
 - **Idempotent on the receiving side.** The request carries the timeline entry's id. notification-service stores it with a unique constraint per channel, so a retry after a lost response returns the first outcome and never posts to Slack twice.
 - **Every outcome is recorded and visible.** Rows are written as PENDING before any channel is called, then become SENT, FAILED (with the reason and number of attempts) or SKIPPED (circuit open). The incident page lists them, and the dashboard shows each channel with Slack's circuit state. Error messages never include the webhook URL, which is a secret.
 - **The service-to-service hop has its own credential.** `/internal/**` accepts only the shared `NOTIFICATION_SERVICE_TOKEN` (compared in constant time), a user's JWT doesn't open it, and the gateway has no route to it. One shared secret is enough for one caller; with more, the next step is short-lived service tokens from auth-service (OAuth2 client credentials).
-- **Tradeoff: delivery is best effort.** If notification-service is unreachable for all three attempts, or its circuit is open, incident-service drops that notification and counts it in `beacon.notifications.dropped`. A FAILED Slack delivery isn't retried later either. The incident, the thing that matters, is always saved. Guaranteed delivery would mean a transactional outbox on both sides; for a pager that would be the next step.
+- **Tradeoff: delivery is best effort.** If notification-service is unreachable for all three attempts, or its circuit is open, incident-service drops that notification and counts it in `beacon.notifications.dropped`. A FAILED Slack delivery isn't retried later either. The incident, the thing that matters, is always saved. Guaranteed delivery would mean a transactional outbox on both sides; for a pager that would be the next step. Two more consequences of the same choice:
+  - Deliveries run concurrently, so Slack can show "resolved" just before "triggered" when they are seconds apart.
+  - If notification-service dies mid-delivery, that row stays PENDING; nothing sweeps it up.
 - **Circuit state through Actuator.** `circuitbreakers`, `circuitbreakerevents` and the `circuitBreakers` health component are exposed on both services; like metrics, they need a bearer token. An open circuit shows as `CIRCUIT_OPEN` but doesn't mark the service down (`allow-health-indicator-to-fail: false`), and readiness only covers the service itself, so a Slack outage never takes notification-service out of rotation.
 
   ```bash
@@ -406,7 +408,7 @@ Services read their configuration from environment variables. The `local` Spring
 | `AUTH_JWKS_URI` | gateway, incident-service, notification-service | `http://auth-service:8082/.well-known/jwks.json` |
 | `AUTH_SERVICE_URL`, `INCIDENT_SERVICE_URL`, `NOTIFICATION_SERVICE_URL` | gateway (and incident-service for the last) | the Compose service names |
 | `NOTIFICATION_SERVICE_TOKEN` | incident-service, notification-service | `local-service-token`; required, neither starts without it |
-| `SLACK_WEBHOOK_URL` | notification-service | the `fake-slack` container; empty turns Slack off. A real one is a secret |
+| `SLACK_WEBHOOK_URL` | notification-service | unset: the `fake-slack` container; set but empty: Slack off (mock sink only). A real one is a secret |
 | `BEACON_PUBLIC_URL` | notification-service | `http://localhost:4200`, for the link in each message |
 | `TRUSTED_PROXY_HOPS` | gateway | `1` (nginx) |
 | `RATE_LIMIT_LOGIN_CAPACITY`, `RATE_LIMIT_API_CAPACITY` | gateway | `10` per minute per IP, `100` per 10 s per user |
