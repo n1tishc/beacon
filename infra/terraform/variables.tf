@@ -10,10 +10,14 @@ variable "github_repository" {
   default     = "n1tishc/beacon"
 }
 
-variable "create_github_oidc_provider" {
-  description = "An account has at most one GitHub OIDC provider. Set false if yours already has one."
-  type        = bool
-  default     = true
+variable "github_deploy_auth" {
+  description = "How the deploy job authenticates: oidc, oidc-existing-provider (the account already has GitHub's provider) or access-key (accounts that forbid identity providers). See github.tf."
+  type        = string
+  default     = "oidc"
+  validation {
+    condition     = contains(["oidc", "oidc-existing-provider", "access-key"], var.github_deploy_auth)
+    error_message = "github_deploy_auth must be oidc, oidc-existing-provider or access-key."
+  }
 }
 
 variable "budget_alert_email" {

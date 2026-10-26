@@ -370,12 +370,23 @@ scripts/aws-destroy.sh                                  # deletes everything, da
 3. It applies the main configuration.
 4. It creates the repository's `production` environment, deployable from `main` only, and stores the deploy job's settings as GitHub Actions *variables*. None of them is a secret.
 
-Optional settings: `AWS_REGION` (default `us-east-1`), `TF_VAR_slack_webhook_url` and `TF_VAR_demo_user_password`. Without a webhook, Slack is off and the smoke test expects `EXPECT_SLACK=off`. Without a demo password, Terraform generates one, and the script prints how to read it from SSM.
+Optional settings: `AWS_REGION` (default `us-east-1`), `TF_VAR_slack_webhook_url`, `TF_VAR_demo_user_password` and `TF_VAR_github_deploy_auth`. Without a webhook, Slack is off and the smoke test expects `EXPECT_SLACK=off`. Without a demo password, Terraform generates one, and the script prints how to read it from SSM.
+
+**Accounts from AWS's newer sign-up ("project" accounts).** These sit in an AWS-managed organization whose policies can't be changed. Two of them matter here:
+- The account works in **one home Region only**. Any other Region is denied, apart from global services such as IAM, CloudFront and Budgets. Set `AWS_REGION` to the home Region. Its AWS console shows no Region picker, but a read-only call answers in the home Region alone.
+- **IAM identity providers are denied** (`iam:*Provider*`), so GitHub's OIDC provider can't be created. Use `TF_VAR_github_deploy_auth=access-key`: the deploy job then signs in as an IAM user, `beacon-github-deploy`, which has exactly the deploy role's policy. `aws-up.sh` creates that user's access key and pipes it straight into the `production` environment's secrets. The key never appears in the repository, on disk or in Terraform state, and only jobs in that environment, which deploy from `main` only, can read it. It is still a long-lived key: rotate it by deleting it in IAM and re-running `aws-up.sh`. `aws-destroy.sh` deletes it.
+
+```bash
+AWS_REGION=us-east-2 TF_VAR_github_deploy_auth=access-key \
+  BUDGET_ALERT_EMAIL=you@example.com scripts/aws-up.sh
+```
+
+If your account already has GitHub's OIDC provider (an account can hold only one), use `TF_VAR_github_deploy_auth=oidc-existing-provider`.
 
 ### What a deploy does
 
 The `deploy` job runs on `main` after the four CI jobs pass:
-1. It assumes `beacon-github-deploy` through GitHub's OIDC provider. No AWS keys are stored in GitHub.
+1. It assumes `beacon-github-deploy` through GitHub's OIDC provider, so no AWS keys are stored in GitHub. On accounts that forbid identity providers, it uses the `beacon-github-deploy` user's access key from the environment's secrets instead (see above).
 2. It builds the four images and pushes them to ECR, tagged with the commit SHA. Tags are immutable, so a rerun skips images that are already there.
 3. It runs `deploy/start.sh <sha>` on the instance through SSM Run Command (`scripts/deploy-to-instance.sh`). No SSH and no open port 22.
    - The script reads `/beacon/app/*` from Parameter Store into a root-only `.env`, pulls the images and starts them one after another.
@@ -394,7 +405,7 @@ Rolling back means deploying an older SHA: `start.sh` takes any tag that is stil
 - **Tradeoff: CloudFront reaches the instance over plain HTTP.** Without a domain of our own, the instance has no certificate CloudFront would accept. Browsers always use HTTPS, but the CloudFront-to-EC2 hop is not encrypted. With a domain, the fix is an ACM certificate on the origin, or an ALB, which is not free.
 - **Least-privilege roles, split by who changes what.**
   - The instance role can consume the one queue, read and write `incidents/*` in the attachment bucket, read `/beacon/app/*` and pull Beacon's images. `ListBucket` is needed too: without it, S3 answers 403 instead of 404 for an upload that hasn't arrived, and "not uploaded yet" would look like "access denied".
-  - The deploy role can ship a release: push images, sync the web bucket, invalidate the distribution, update the Lambda's code, run commands on this one instance and read two parameters. It can't change infrastructure; `terraform apply` is run by a person with `aws-up.sh`. Infrastructure changes are rare here, and a CI role that can create IAM roles is effectively an admin role.
+  - The deploy role (or, in `access-key` mode, the deploy user, with the same policy) can ship a release: push images, sync the web bucket, invalidate the distribution, update the Lambda's code, run commands on this one instance and read two parameters. It can't change infrastructure; `terraform apply` is run by a person with `aws-up.sh`. Infrastructure changes are rare here, and a CI role that can create IAM roles is effectively an admin role.
   - `terraform test` enforces both scopes (see [Tests](#tests)).
 - **Secrets live in SSM Parameter Store as SecureString**, with the AWS-managed key, so there is nothing extra to pay for. Terraform generates them: the database password, the JWT signing key (stable, so deploys don't log anyone out), the service token and the ingest key. That puts them in the Terraform state too, which is why the state is in a private, encrypted, versioned bucket with S3-native locking, and not on a laptop.
 - **Four JVMs on 1 GiB.** Measured locally with the production flags after a full smoke test, the services sit at about 245–290 MiB resident each, about 1.1 GiB together. The rest goes to swap.
@@ -495,7 +506,7 @@ Postmortems run against a real Postgres and LocalStack S3 with signature checks 
 
 `PostmortemSecurityTest` adds the role checks with real tokens (viewers read but can't write or upload), and a simulated AWS SDK failure mapped to `503`.
 
-The Terraform has its own tests (`infra/terraform/tests/`), run by `terraform test` against a mocked AWS provider, so they need no account. They pin the decisions this README makes: only CloudFront's prefix list reaches the instance; RDS is private; IMDSv2 is required with a hop limit of 2; CPU credits are standard; disks are encrypted; both buckets block public access; CORS allows only the app's origin; `/api/*` is HTTPS-only and uncached, with no custom error pages. They also check that neither IAM role uses wildcard actions, that `Resource: "*"` appears only for actions that can't be scoped, and that only this repository's `production` environment can assume the deploy role. Two of them were checked by breaking them on purpose (IMDSv2 set to optional, and `ssm:*` on the deploy role), and both failed as they should.
+The Terraform has its own tests (`infra/terraform/tests/`), run by `terraform test` against a mocked AWS provider, so they need no account. They pin the decisions this README makes: only CloudFront's prefix list reaches the instance; RDS is private; IMDSv2 is required with a hop limit of 2; CPU credits are standard; disks are encrypted; both buckets block public access; CORS allows only the app's origin; `/api/*` is HTTPS-only and uncached, with no custom error pages. They also check that neither IAM role uses wildcard actions, that `Resource: "*"` appears only for actions that can't be scoped, and that only this repository's `production` environment can assume the deploy role. In `access-key` mode they check that no OIDC provider or role is attempted, and that the deploy user gets exactly the deploy role's policy. Two of them were checked by breaking them on purpose (IMDSv2 set to optional, and `ssm:*` on the deploy role), and both failed as they should.
 
 CI (`.github/workflows/ci.yml`) runs four parallel jobs on every push and PR:
 - Maven `verify`, with the JaCoCo reports uploaded as an artifact
@@ -617,7 +628,7 @@ Services read their configuration from environment variables. The `local` Spring
 | `FAKE_SLACK_PORT` | fake-slack | `8089`, bound to `127.0.0.1` |
 | `JAVA_OPTS` | all JVM images | `-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -Xss512k`; fixed, smaller limits in AWS (`deploy/docker-compose.yml`) |
 
-No secrets are committed. In AWS, the secrets and per-environment values come from SSM Parameter Store (see [Deploying to AWS](#deploying-to-aws)), and GitHub holds no AWS keys at all.
+No secrets are committed. In AWS, the secrets and per-environment values come from SSM Parameter Store (see [Deploying to AWS](#deploying-to-aws)). With OIDC, GitHub holds no AWS keys at all; in `access-key` mode it holds one deploy-only key, as a `production` environment secret.
 
 ## Design notes
 

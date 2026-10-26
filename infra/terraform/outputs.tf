@@ -14,11 +14,11 @@ output "demo_password_parameter" {
 }
 
 # scripts/aws-up.sh stores these as GitHub Actions variables for the deploy job. None is a secret:
-# the job reads the two secrets it needs from SSM with the deploy role.
+# the job reads the two secrets it needs from SSM with its deploy credentials. AWS_DEPLOY_ROLE_ARN
+# exists only with OIDC; with an access key, the key itself is in the environment's secrets.
 output "github_variables" {
-  value = {
+  value = merge(local.deploy_with_oidc ? { AWS_DEPLOY_ROLE_ARN = aws_iam_role.deploy[0].arn } : {}, {
     AWS_REGION                 = var.region
-    AWS_DEPLOY_ROLE_ARN        = aws_iam_role.deploy.arn
     ECR_REGISTRY               = local.registry
     WEB_BUCKET                 = aws_s3_bucket.web.id
     CLOUDFRONT_DISTRIBUTION_ID = aws_cloudfront_distribution.web.id
@@ -30,5 +30,10 @@ output "github_variables" {
     INGEST_KEY_PARAMETER       = aws_ssm_parameter.ingest_api_key.name
     # Whether a webhook is set is not secret, only the webhook itself.
     EXPECT_SLACK = nonsensitive(var.slack_webhook_url == "") ? "off" : "sent"
-  }
+  })
+}
+
+output "deploy_user_name" {
+  description = "The IAM user whose access key aws-up.sh stores in GitHub (access-key mode), or empty."
+  value       = try(aws_iam_user.deploy[0].name, "")
 }

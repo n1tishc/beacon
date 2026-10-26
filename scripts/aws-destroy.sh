@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Deletes the whole AWS deployment, data included: database, attachments, images, Terraform state.
-# Also removes the GitHub deploy variables, so the deploy job goes back to being skipped.
+# Also removes the GitHub deploy variables (and, in access-key mode, the key's secrets), so the deploy
+# job goes back to being skipped.
 #
 #   scripts/aws-destroy.sh
 #
-# Same credentials and AWS_REGION as scripts/aws-up.sh. Terraform lists what it will delete and asks.
+# Same credentials and environment (AWS_REGION, TF_VAR_github_deploy_auth) as scripts/aws-up.sh.
+# Terraform lists what it will delete and asks.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,5 +27,9 @@ terraform -chdir=infra/terraform/bootstrap destroy -input=false -var "region=$RE
 
 for name in $VARIABLES; do
   gh variable delete "$name" --repo "$REPO" || true
+done
+# The access key died with its user; remove the copies in GitHub too (absent with OIDC).
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+  gh secret delete "$name" --env production --repo "$REPO" 2>/dev/null || true
 done
 echo "Beacon's AWS deployment is gone."

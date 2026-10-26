@@ -4,7 +4,9 @@
 #
 #   BUDGET_ALERT_EMAIL=you@example.com scripts/aws-up.sh
 #
-# Optional: AWS_REGION (default us-east-1), TF_VAR_slack_webhook_url, TF_VAR_demo_user_password.
+# Optional: AWS_REGION (default us-east-1), TF_VAR_slack_webhook_url, TF_VAR_demo_user_password,
+# TF_VAR_github_deploy_auth (default oidc; access-key for accounts that forbid identity providers,
+# such as AWS project accounts, which are also limited to one home Region: set AWS_REGION to it).
 # Terraform shows its plan and asks before changing anything.
 #
 # Afterwards, every push to main deploys (the `deploy` job in .github/workflows/ci.yml). For the
@@ -38,6 +40,21 @@ gh api --method PUT "repos/$REPO/environments/production" \
   -F 'deployment_branch_policy[custom_branch_policies]=true' >/dev/null
 gh api --method POST "repos/$REPO/environments/production/deployment-branch-policies" \
   -f name=main >/dev/null 2>&1 || true # already there on a re-run
+
+# access-key mode only: the deploy user's key goes from AWS straight into the environment's secrets,
+# through a pipe, so it is never written to disk, printed, or kept in Terraform state.
+DEPLOY_USER="$(terraform -chdir=infra/terraform output -raw deploy_user_name)"
+if [[ -n "$DEPLOY_USER" ]]; then
+  echo "==> GitHub: access key for $DEPLOY_USER"
+  if [[ "$(aws iam list-access-keys --user-name "$DEPLOY_USER" --query 'length(AccessKeyMetadata)')" == 0 ]]; then
+    KEY="$(aws iam create-access-key --user-name "$DEPLOY_USER" --output json)"
+    jq -r .AccessKey.AccessKeyId <<<"$KEY" | gh secret set AWS_ACCESS_KEY_ID --env production --repo "$REPO"
+    jq -r .AccessKey.SecretAccessKey <<<"$KEY" | gh secret set AWS_SECRET_ACCESS_KEY --env production --repo "$REPO"
+    unset KEY
+  else
+    echo "    $DEPLOY_USER already has a key, kept as is. To rotate it, delete it in IAM and re-run this script."
+  fi
+fi
 
 echo "==> GitHub: deploy variables (none of them secret)"
 terraform -chdir=infra/terraform output -json github_variables \
