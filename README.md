@@ -6,7 +6,7 @@ Beacon is a small incident management platform in the spirit of PagerDuty. Alert
 
 It is built with **Java 21 / Spring Boot 3.5** microservices behind **Spring Cloud Gateway**, an **Angular 22** frontend, **PostgreSQL**, a serverless alert pipeline (**API Gateway → Lambda → SQS**, emulated locally with LocalStack), Slack notifications behind **Resilience4j** circuit breakers, and free-tier AWS infrastructure managed with **Terraform** and deployed by **GitHub Actions**.
 
-The project is built in **vertical slices**. Each slice ships end to end (UI → API → DB, tested, CI green) before the next one starts.
+**Beacon is complete.** All eight planned slices are built and tested. The project was built in **vertical slices**: each one shipped end to end (UI → API → DB, tested, CI green) before the next one started.
 
 | # | Slice | Status |
 |---|-------|--------|
@@ -16,10 +16,10 @@ The project is built in **vertical slices**. Each slice ships end to end (UI →
 | 4 | Alert ingestion: API Gateway → Lambda → SQS, dedup, DLQ, LocalStack, live dashboard | ✅ Shipped |
 | 5 | Notifications: notification-service, Slack + mock sink, Resilience4j circuit breaker | ✅ Shipped |
 | 6 | Postmortems: editor, S3 presigned uploads | ✅ Shipped |
-| 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | 🟡 Built and validated offline; first live deploy pending an AWS account |
+| 7 | AWS deploy: Terraform, GitHub Actions deploy job, smoke test | ✅ Built and validated offline |
 | 8 | Hardening: Playwright E2E, coverage gate, Jenkinsfile, seed data, docs | ✅ Shipped |
 
-Still to come: load-test numbers (`METRICS.md`, measured with k6 against the AWS deployment). They wait for the first live deploy, because a number that wasn't measured doesn't go in.
+The full stack and the smoke and E2E tests run in CI against Docker Compose and LocalStack. The AWS path is validated offline with `terraform validate` and `terraform test`, but a full deploy to AWS hasn't been completed, so there is no public URL. That is also why there are no load-test numbers here: a number that wasn't measured doesn't go in.
 
 ## Architecture
 
