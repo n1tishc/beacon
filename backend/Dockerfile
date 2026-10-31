@@ -7,6 +7,10 @@ FROM eclipse-temurin:21-jdk AS build
 WORKDIR /workspace
 COPY . .
 ARG SERVICE
+# docker compose builds five images at once, all sharing this Maven cache. The wrapper unpacks Maven
+# into it on first use, and parallel unpacks collide, so install it under a lock first; the build
+# below then shares the cache freely.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked ./mvnw -q --version >/dev/null
 RUN --mount=type=cache,target=/root/.m2 \
     ./mvnw -B -q -pl "${SERVICE}" -am -DskipTests package \
     && cp "${SERVICE}/target/${SERVICE}.jar" /workspace/app.jar

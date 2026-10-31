@@ -155,7 +155,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && vars.AWS_DEPLOY_ROLE_ARN != ''
+      && vars.AWS_REGION != ''
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -171,9 +171,14 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
+      # OIDC (the default): assume the deploy role. Accounts that forbid identity providers use the
+      # deploy user's access key instead, kept in this environment's secrets (infra/terraform/github.tf).
+      # Exactly one of the two is set up by scripts/aws-up.sh.
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
       - uses: docker/setup-buildx-action@v4

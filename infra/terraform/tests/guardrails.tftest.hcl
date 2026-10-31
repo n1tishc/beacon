@@ -128,9 +128,40 @@ run "the_deploy_role_cannot_change_infrastructure" {
     error_message = "Only actions without resource-level scoping may use Resource \"*\"."
   }
   assert {
-    condition = anytrue([for condition in data.aws_iam_policy_document.github_assume.statement[0].condition :
+    condition = anytrue([for condition in data.aws_iam_policy_document.github_assume[0].statement[0].condition :
     condition.variable == "token.actions.githubusercontent.com:sub" && condition.values == tolist(["repo:n1tishc/beacon:environment:production"])])
     error_message = "Only this repository's production environment may assume the deploy role."
+  }
+}
+
+# Accounts that forbid identity providers deploy with an IAM user's access key instead: same policy,
+# and no OIDC provider or role is attempted at all, since creating one would be denied mid-apply.
+run "an_access_key_deploy_user_gets_the_same_narrow_policy" {
+  variables {
+    github_deploy_auth = "access-key"
+  }
+  assert {
+    condition     = length(aws_iam_openid_connect_provider.github) == 0 && length(aws_iam_role.deploy) == 0
+    error_message = "access-key mode must not create an OIDC provider or role."
+  }
+  assert {
+    condition     = aws_iam_user_policy.deploy[0].policy == data.aws_iam_policy_document.deploy.json
+    error_message = "The deploy user must get exactly the deploy role's policy."
+  }
+  assert {
+    condition     = output.deploy_user_name == "beacon-github-deploy" && !contains(keys(output.github_variables), "AWS_DEPLOY_ROLE_ARN")
+    error_message = "aws-up.sh needs the user's name, and the deploy job must not see a role to assume."
+  }
+}
+
+run "oidc_is_the_default" {
+  assert {
+    condition     = length(aws_iam_openid_connect_provider.github) == 1 && length(aws_iam_user.deploy) == 0
+    error_message = "By default the deploy job uses OIDC and no IAM user exists."
+  }
+  assert {
+    condition     = output.deploy_user_name == "" && contains(keys(output.github_variables), "AWS_DEPLOY_ROLE_ARN")
+    error_message = "With OIDC the deploy job gets a role ARN and there is no deploy user."
   }
 }
 
